@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "SubtideX",
   "version": "1.5.0",
-  "description": "Extract YouTube subtitles with one click and download as CSV",
+  "description": "Download YouTube captions as CSV — transcript panel extraction, Tidal UI, Manifest V3",
   "author": "Tony Fiston (https://github.com/yniijia)",
   "permissions": ["activeTab", "scripting", "downloads", "storage"],
   "host_permissions": ["*://*.youtube.com/*"],

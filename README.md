@@ -4,8 +4,13 @@
   <img src="icons/icon128.png" alt="SubtideX" width="96" height="96">
   <p><strong>Download YouTube captions in one calm click.</strong></p>
   <p>
-    <a href="https://github.com/yniijia/SubtideX">GitHub</a> ·
-    <a href="https://github.com/yniijia/SubtideX/issues">Report an issue</a>
+    <a href="https://github.com/yniijia/subtidex/releases/tag/v1.5.0"><img src="https://img.shields.io/badge/version-1.5.0-teal?style=flat-square" alt="v1.5.0"></a>
+    <a href="https://github.com/yniijia/subtidex/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
+  </p>
+  <p>
+    <a href="https://github.com/yniijia/subtidex">GitHub</a> ·
+    <a href="https://github.com/yniijia/subtidex/releases/latest">Download v1.5.0</a> ·
+    <a href="https://github.com/yniijia/subtidex/issues">Report an issue</a>
   </p>
 </div>
 
@@ -30,27 +35,36 @@ Built for researchers, creators, language learners, and anyone who needs transcr
 
 ## Installation
 
+### Quick install (recommended)
+
+1. Download **[subtidex.zip](https://github.com/yniijia/subtidex/releases/latest/download/subtidex.zip)** from the latest release
+2. Unzip it into a folder (e.g. `subtidex/`) — you should see `manifest.json` at the top level
+3. Open `chrome://extensions/` in Chrome
+4. Enable **Developer mode** (top right)
+5. Click **Load unpacked** and select that folder
+
+> **Note:** After updating the extension, reload it on `chrome://extensions/` and refresh any open YouTube tabs.
+
 ### From source (developer mode)
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yniijia/SubtideX.git
-   cd SubtideX
+   git clone https://github.com/yniijia/subtidex.git
+   cd subtidex
    ```
-2. Open `chrome://extensions/` in Chrome
-3. Enable **Developer mode**
-4. Click **Load unpacked** and select the project folder
+2. Open `chrome://extensions/` → enable **Developer mode** → **Load unpacked** → select the project folder
 
-### From a release ZIP
+No `npm install` required. Optional checks:
 
-1. Download `subtidex.zip` from [Releases](https://github.com/yniijia/SubtideX/releases) (or run `npm run build` locally)
-2. Unzip the archive
-3. Load the unzipped folder via **Load unpacked** on `chrome://extensions/`
+```bash
+npm run check   # verify required files
+npm run build   # create dist/subtidex.zip
+```
 
 ## Usage
 
 1. Open any YouTube video (`youtube.com/watch?v=…`)
-2. Click the **SubtideX** icon in the toolbar
+2. Click the **SubtideX** icon in the toolbar (hover: **Download Captions**)
 3. Click **Download Captions**
 4. Watch the progress panel in the bottom-right corner of the page
 5. Find the CSV in your **Downloads** folder
@@ -91,17 +105,18 @@ If transcript scraping is unavailable, the extension may fall back to player cap
 |-------|-------------|
 | “No subtitles found” | Refresh the page, open **Show transcript**, wait for lines to appear, retry |
 | Timeout | Ensure the transcript panel is visible and the video has captions |
+| “Receiving end does not exist” | Reload the extension, then **hard-refresh** the YouTube tab (`Cmd+Shift+R`) |
 | Empty CSV / partial file | Scroll the transcript manually, then extract again |
 | Extension not on video page | URL must be `youtube.com/watch?v=…` |
 
-For persistent problems, open DevTools (**F12 → Console**) and look for `SubtideX:` log messages, then [open an issue](https://github.com/yniijia/SubtideX/issues) with the video URL and error text.
+For persistent problems, open DevTools (**F12 → Console**) and look for `SubtideX:` log messages, then [open an issue](https://github.com/yniijia/subtidex/issues) with the video URL and error text.
 
 ## Development
 
 ### Project structure
 
 ```
-SubtideX/
+subtidex/
 ├── manifest.json          # Extension manifest (MV3)
 ├── popup.html / popup.js  # Toolbar popup UI
 ├── content.js             # YouTube page script (extraction + Tidal overlay)
@@ -114,21 +129,6 @@ SubtideX/
 ├── scripts/
 │   └── check.mjs          # Sanity checks for required files
 └── package.json           # Build/check scripts
-```
-
-### Scripts
-
-No npm dependencies are required. From the project root:
-
-```bash
-# Verify required files and manifest JSON
-npm run check
-
-# Create dist/subtidex.zip for distribution
-npm run build
-
-# Remove build output
-npm run clean
 ```
 
 After changing code, reload the extension on `chrome://extensions/` and hard-refresh the YouTube tab.
@@ -147,12 +147,14 @@ After changing code, reload the extension on `chrome://extensions/` and hard-ref
 - Only works on YouTube **watch** pages with available captions/transcripts
 - Live streams and some premium or region-locked content may not expose transcripts
 - Caption quality depends on what YouTube provides (auto-generated vs. manual)
+- Not published on the Chrome Web Store yet — install via release ZIP or load unpacked
 
 ## Roadmap
 
 - [ ] Additional export formats (TXT, SRT, VTT)
 - [ ] Recent extraction history
 - [ ] Keyboard shortcut on YouTube watch pages
+- [ ] Chrome Web Store listing
 
 ## License
 
@@ -162,4 +164,4 @@ MIT — see [LICENSE](LICENSE).
 
 **Tony Fiston** — [github.com/yniijia](https://github.com/yniijia)
 
-If SubtideX saves you time, consider [starring the repo](https://github.com/yniijia/SubtideX).
+If SubtideX saves you time, consider [starring the repo](https://github.com/yniijia/subtidex).
