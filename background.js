@@ -1,5 +1,5 @@
 // Background script for SubtideX extension
-console.log("SubtideX: Background script loaded - v1.1.1");
+console.log("SubtideX: Background script loaded - v1.5.0");
 
 // Global state
 let currentTabId = null;
@@ -56,7 +56,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   try {
     switch (message.action) {
       case "startExtraction":
-        handleStartExtraction(sender, sendResponse);
+        handleStartExtraction(message, sender, sendResponse);
         break;
         
       case "downloadCSV":
@@ -86,6 +86,95 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "reloadAndExtract":
         handleReloadAndExtract(message.tabId);
         break;
+
+      case "openTab":
+        if (message.url) {
+          chrome.tabs.create({ url: message.url });
+          sendResponse({ status: "success" });
+        } else {
+          sendResponse({ status: "error", error: "No URL provided" });
+        }
+        break;
+
+      case "fetchViaMainWorld":
+        // Fetch a URL from the page's MAIN world using chrome.scripting to bypass
+        // cases where content-script fetch gets an empty/blocked body (CORB/CSP).
+        if (!sender.tab?.id) {
+          sendResponse({ status: "error", error: "No sender tab available" });
+          break;
+        }
+        if (!message.url) {
+          sendResponse({ status: "error", error: "No URL provided" });
+          break;
+        }
+
+        chrome.scripting.executeScript({
+          target: { tabId: sender.tab.id },
+          world: "MAIN",
+          args: [message.url],
+          func: async (url) => {
+            const resp = await fetch(url, { credentials: "include", redirect: "follow" });
+            const contentType = resp.headers.get("content-type") || "";
+            const text = await resp.text();
+            return {
+              ok: resp.ok,
+              status: resp.status,
+              statusText: resp.statusText,
+              url: resp.url,
+              contentType,
+              body: text
+            };
+          }
+        }).then((results) => {
+          const result = results?.[0]?.result;
+          sendResponse({ status: "success", result });
+        }).catch((error) => {
+          console.error("SubtideX: fetchViaMainWorld failed:", error);
+          sendResponse({ status: "error", error: error?.message || String(error) });
+        });
+        break;
+
+      case "fetchText":
+        // Fetch a URL from the extension service worker context.
+        // This avoids some renderer/CORB cases where content scripts see an empty body.
+        if (!message.url) {
+          sendResponse({ status: "error", error: "No URL provided" });
+          break;
+        }
+
+        fetch(message.url, {
+          credentials: "include",
+          redirect: "follow",
+          cache: "no-store",
+          headers: {
+            // Hint the formats we can parse
+            "accept": "text/vtt,text/xml,application/json;q=0.9,*/*;q=0.8"
+          }
+        })
+          .then(async (resp) => {
+            const contentType = resp.headers.get("content-type") || "";
+            const body = await resp.text();
+            sendResponse({
+              status: "success",
+              result: {
+                ok: resp.ok,
+                status: resp.status,
+                statusText: resp.statusText,
+                url: resp.url,
+                contentType,
+                body
+              }
+            });
+          })
+          .catch((error) => {
+            console.error("SubtideX: fetchText failed:", error);
+            sendResponse({ status: "error", error: error?.message || String(error) });
+          });
+        break;
+
+      case "getTranscriptViaMainWorld":
+        handleInnertubeExtraction(sender, sendResponse);
+        break;
     }
   } catch (error) {
     console.error("SubtideX: Error handling message:", error, message);
@@ -96,38 +185,163 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
+function handleInnertubeExtraction(sender, sendResponse) {
+  const tabId = sender.tab?.id;
+  if (!tabId) {
+    sendResponse({ status: "error", error: "No sender tab available" });
+    return;
+  }
+
+  chrome.scripting
+    .executeScript({
+      target: { tabId },
+      world: "MAIN",
+      files: ["innertube-extract.js"],
+    })
+    .then(() =>
+      chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: async () => {
+          try {
+            const extract = window.__SUBTIDEX_EXTRACT_SUBTITLES__;
+            if (typeof extract !== "function") {
+              return { error: "SubtideX InnerTube extractor failed to load" };
+            }
+            return await extract();
+          } catch (e) {
+            return { error: e?.message || String(e) };
+          }
+        },
+      })
+    )
+    .then((results) => {
+      const frameResult = results?.[0];
+      if (frameResult?.error) {
+        throw new Error(frameResult.error.message || String(frameResult.error));
+      }
+      const result = frameResult?.result;
+      if (result?.error) {
+        throw new Error(result.error);
+      }
+      if (!result?.subtitles?.length) {
+        throw new Error(result?.message || "No subtitles returned from InnerTube extractor");
+      }
+      sendResponse({ status: "success", result });
+    })
+    .catch((error) => {
+      console.error("SubtideX: InnerTube extraction failed:", error);
+      sendResponse({ status: "error", error: error?.message || String(error) });
+    });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Ensure the content script is connected on a YouTube watch tab.
+ * After an extension reload, manifest-injected scripts on open tabs are dead until
+ * the page is refreshed — we re-inject programmatically when needed.
+ */
+async function ensureContentScript(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+
+  if (!tab?.url?.includes('youtube.com')) {
+    throw new Error('Open a YouTube video page first.');
+  }
+
+  if (!isYouTubeVideo(tab.url)) {
+    throw new Error('Navigate to a YouTube watch page (youtube.com/watch?v=…) first.');
+  }
+
+  const ping = () =>
+    new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(tabId, { action: 'ping' }, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(response);
+      });
+    });
+
+  try {
+    await ping();
+    return;
+  } catch {
+    // Content script not connected — inject below
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content.js'],
+  });
+
+  for (let attempt = 0; attempt < 8; attempt++) {
+    await sleep(150);
+    try {
+      await ping();
+      return;
+    } catch {
+      // retry
+    }
+  }
+
+  throw new Error('Could not connect to the YouTube tab. Refresh the page and try again.');
+}
+
 /**
  * Handles the start extraction message
  */
-function handleStartExtraction(sender, sendResponse) {
+async function handleStartExtraction(message, sender, sendResponse) {
   if (isProcessing) {
     console.log("SubtideX: Already processing, ignoring duplicate request");
     sendResponse({ status: "busy" });
     return;
   }
-  
+
   isProcessing = true;
-  
-  // If message came from popup, we need to send a message to the content script
-  if (sender.tab === undefined && currentTabId) {
-    console.log("SubtideX: Forwarding extraction request to content script");
-    
-    chrome.tabs.sendMessage(currentTabId, { action: "startExtraction" })
-      .then(response => {
-        isProcessing = false;
-        sendResponse({ status: "started" });
-      })
-      .catch(error => {
-        console.error("SubtideX: Error forwarding extraction request:", error);
-        isProcessing = false;
-        sendResponse({ status: "error", error: "Failed to communicate with YouTube page" });
-      });
-  } 
-  // If message came from content script, acknowledge receipt
-  else if (sender.tab) {
+
+  if (sender.tab !== undefined) {
     console.log("SubtideX: Direct extraction request from content script");
     sendResponse({ status: "started" });
     isProcessing = false;
+    return;
+  }
+
+  const tabId = message?.tabId || currentTabId;
+  if (!tabId) {
+    isProcessing = false;
+    sendResponse({
+      status: "error",
+      error: "No active YouTube tab found. Open a YouTube video and try again.",
+    });
+    return;
+  }
+
+  currentTabId = tabId;
+
+  try {
+    await ensureContentScript(tabId);
+    await new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(tabId, { action: 'startExtraction' }, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(response);
+      });
+    });
+    isProcessing = false;
+    sendResponse({ status: "started" });
+  } catch (error) {
+    console.error("SubtideX: Error starting extraction:", error);
+    isProcessing = false;
+    sendResponse({
+      status: "error",
+      error: error?.message || "Failed to communicate with YouTube page. Refresh the tab and retry.",
+    });
   }
 }
 
@@ -267,28 +481,20 @@ function handleReloadAndExtract(tabId) {
           
           // Wait a moment for the YouTube player to initialize
           setTimeout(() => {
-            console.log("SubtideX: Starting extraction after reload");
-            
-            // Now start the extraction
-            chrome.tabs.sendMessage(tabId, { action: "startExtraction" }, (response) => {
-              if (chrome.runtime.lastError) {
-                console.error("SubtideX: Error starting extraction after reload:", chrome.runtime.lastError);
-                
-                // Content script might not be ready, inject it again
-                chrome.scripting.executeScript({
-                  target: { tabId: tabId },
-                  files: ['content.js']
-                }).then(() => {
-                  // Try again after injecting
-                  setTimeout(() => {
-                    chrome.tabs.sendMessage(tabId, { action: "startExtraction" });
-                  }, 500);
+            ensureContentScript(tabId)
+              .then(() => {
+                chrome.tabs.sendMessage(tabId, { action: "startExtraction" }, (response) => {
+                  if (chrome.runtime.lastError) {
+                    console.error("SubtideX: Error starting extraction after reload:", chrome.runtime.lastError);
+                  } else {
+                    console.log("SubtideX: Extraction started after reload:", response);
+                  }
                 });
-              } else {
-                console.log("SubtideX: Extraction started after reload:", response);
-              }
-            });
-          }, 2000); // 2 second delay for YouTube player initialization
+              })
+              .catch((err) => {
+                console.error("SubtideX: Could not connect after reload:", err);
+              });
+          }, 2000);
         }
       }
       

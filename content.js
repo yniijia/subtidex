@@ -9,9 +9,268 @@ let debugMode = false;
 // DOM elements and UI references
 let loadingIndicator = null;
 let notificationElement = null;
+let loadingStatusTextEl = null;
+let loadingMessageTextEl = null;
+let loadingStepsEl = null;
+let lastExtractionMeta = { count: 0, filename: '' };
 
-// Initialize as soon as the document is ready
-initializeContentScript();
+function sendMessageAsync(message) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(response);
+      });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+// Initialize once per content-script context (avoids duplicate listeners on re-inject)
+if (!globalThis.__SUBTIDEX_CS_READY__) {
+  globalThis.__SUBTIDEX_CS_READY__ = true;
+  initializeContentScript();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout(promise, timeoutMs, errorMessage) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
+function ensureTidalStyles() {
+  if (document.getElementById('subtidex-tidal-styles')) return;
+
+  const style = document.createElement('style');
+  style.id = 'subtidex-tidal-styles';
+  style.textContent = `
+    @keyframes subtidex-panel-in {
+      from { opacity: 0; transform: translateY(12px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes subtidex-panel-out {
+      from { opacity: 1; transform: translateY(0); }
+      to { opacity: 0; transform: translateY(8px); }
+    }
+    @keyframes subtidex-step-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.45; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .subtidex-panel, .subtidex-toast { animation: none !important; }
+      .subtidex-step--active .subtidex-step__dot { animation: none !important; }
+    }
+    .subtidex-panel {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 99999;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      animation: subtidex-panel-in 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .subtidex-panel__card {
+      width: 320px;
+      background: rgba(15, 23, 42, 0.92);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 16px;
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+      overflow: hidden;
+      color: #f8fafc;
+    }
+    .subtidex-panel__header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 16px 10px;
+      background: linear-gradient(135deg, rgba(12, 74, 110, 0.55) 0%, rgba(20, 184, 166, 0.15) 100%);
+      border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+    }
+    .subtidex-panel__logo {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+    }
+    .subtidex-panel__brand {
+      font-size: 0.9375rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .subtidex-panel__detail {
+      font-size: 0.75rem;
+      color: rgba(248, 250, 252, 0.65);
+      padding: 0 16px 10px;
+    }
+    .subtidex-steps {
+      list-style: none;
+      padding: 8px 16px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .subtidex-step {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.8125rem;
+      color: rgba(248, 250, 252, 0.45);
+      transition: color 0.2s;
+    }
+    .subtidex-step__dot {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 2px solid rgba(148, 163, 184, 0.35);
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+    }
+    .subtidex-step--done { color: #6ee7b7; }
+    .subtidex-step--done .subtidex-step__dot {
+      border-color: #10b981;
+      background: rgba(16, 185, 129, 0.2);
+      color: #6ee7b7;
+    }
+    .subtidex-step--done .subtidex-step__dot::after { content: '✓'; }
+    .subtidex-step--active { color: #f8fafc; font-weight: 500; }
+    .subtidex-step--active .subtidex-step__dot {
+      border-color: #14b8a6;
+      box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.25);
+      animation: subtidex-step-pulse 1.6s ease-in-out infinite;
+    }
+    .subtidex-progress {
+      height: 3px;
+      background: rgba(148, 163, 184, 0.15);
+    }
+    .subtidex-progress__bar {
+      height: 100%;
+      width: 33%;
+      background: linear-gradient(90deg, #0c4a6e, #14b8a6);
+      border-radius: 0 2px 2px 0;
+      transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .subtidex-toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 99999;
+      width: 320px;
+      background: rgba(15, 23, 42, 0.94);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 16px;
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+      padding: 16px;
+      color: #f8fafc;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      animation: subtidex-panel-in 0.35s ease-out;
+    }
+    .subtidex-toast--success { border-color: rgba(16, 185, 129, 0.35); }
+    .subtidex-toast--error { border-color: rgba(239, 68, 68, 0.35); }
+    .subtidex-toast__title {
+      font-size: 0.9375rem;
+      font-weight: 700;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .subtidex-toast__title--success { color: #6ee7b7; }
+    .subtidex-toast__title--error { color: #fca5a5; }
+    .subtidex-toast__sub {
+      font-size: 0.8125rem;
+      color: rgba(248, 250, 252, 0.65);
+      line-height: 1.45;
+      margin-bottom: 12px;
+    }
+    .subtidex-toast__btn {
+      width: 100%;
+      min-height: 36px;
+      border: none;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #0c4a6e, #155e75);
+      color: #fff;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .subtidex-toast__btn:hover { filter: brightness(1.08); }
+    .subtidex-toast__close {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: none;
+      border: none;
+      color: rgba(248, 250, 252, 0.5);
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 1;
+      padding: 4px;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function setExtractionStep(step, detail) {
+  if (!loadingIndicator) return;
+
+  const steps = loadingIndicator.querySelectorAll('.subtidex-step');
+  steps.forEach((el, index) => {
+    const n = index + 1;
+    el.classList.remove('subtidex-step--done', 'subtidex-step--active', 'subtidex-step--pending');
+    if (n < step) el.classList.add('subtidex-step--done');
+    else if (n === step) el.classList.add('subtidex-step--active');
+    else el.classList.add('subtidex-step--pending');
+  });
+
+  const bar = loadingIndicator.querySelector('.subtidex-progress__bar');
+  if (bar) bar.style.width = `${Math.round((step / 3) * 100)}%`;
+
+  const detailEl = loadingIndicator.querySelector('.subtidex-panel__detail');
+  if (detailEl && detail) detailEl.textContent = detail;
+}
+
+function inferStepFromMessage(messageText) {
+  const msg = (messageText || '').toLowerCase();
+  if (msg.includes('opening') || msg.includes('transcript panel')) return 1;
+  if (msg.includes('reading') || msg.includes('caption') || msg.includes('transcript')) return 2;
+  if (msg.includes('convert') || msg.includes('csv') || msg.includes('download') || msg.includes('sending')) return 3;
+  return null;
+}
+
+function setLoadingTexts({ messageText, step } = {}) {
+  if (step) {
+    setExtractionStep(step, messageText);
+  } else if (messageText) {
+    const inferred = inferStepFromMessage(messageText);
+    if (inferred) setExtractionStep(inferred, messageText);
+    if (loadingMessageTextEl) loadingMessageTextEl.textContent = messageText;
+  }
+}
+
+function sanitizeFilename(title) {
+  return (title || 'youtube_subtitles').replace(/[\\/:*?"<>|]/g, '_');
+}
 
 /**
  * Main initialization function for the content script
@@ -53,6 +312,10 @@ function setupMessageListeners() {
     console.log("SubtideX: Content script received message:", message.action);
     
     switch (message.action) {
+      case "ping":
+        sendResponse({ status: "ok", ready: true });
+        break;
+
       case "startExtraction":
         if (!extractionInProgress) {
           extractionInProgress = true;
@@ -81,6 +344,26 @@ function setupMessageListeners() {
         } else {
           sendResponse({ status: "busy" });
         }
+        break;
+
+      case "getVideoInfo":
+        sendResponse({
+          isVideoPage: checkIfYouTubeVideoPage(),
+          videoId: extractVideoId(window.location.href),
+          title: getVideoTitle(),
+          url: window.location.href,
+          thumbnail: (() => {
+            const id = extractVideoId(window.location.href);
+            return id ? `https://i.ytimg.com/vi/${id}/mqdefault.jpg` : null;
+          })(),
+        });
+        break;
+
+      case "downloadSuccess":
+        showSuccessToast(lastExtractionMeta.count ? lastExtractionMeta : undefined);
+        hideLoadingIndicator();
+        extractionInProgress = false;
+        sendResponse({ status: "ack" });
         break;
     }
     
@@ -161,20 +444,23 @@ async function extractAndProcessSubtitles() {
   showLoadingIndicator();
   
   try {
+    setExtractionStep(1, 'Preparing…');
+
     // Check if we're on a video page
     if (!checkIfYouTubeVideoPage()) {
       throw new Error("Not on a YouTube video page");
     }
     
-    // Get video title for filename
     const videoTitle = getVideoTitle();
-    
-    // Get video ID for debugging
     const videoId = extractVideoId(window.location.href);
     console.log(`SubtideX: Extracting subtitles for video ${videoId} - "${videoTitle}"`);
     
-    // Access YouTube's subtitle track
-    const subtitles = await getYouTubeSubtitles();
+    setExtractionStep(1, 'Opening transcript panel…');
+    const subtitles = await withTimeout(
+      getYouTubeSubtitles(),
+      45000,
+      "Subtitle extraction timed out. Open ⋯ → Show transcript, wait for captions to load, then retry."
+    );
     
     if (!subtitles || subtitles.length === 0) {
       throw new Error("No subtitles found for this video");
@@ -182,10 +468,14 @@ async function extractAndProcessSubtitles() {
     
     console.log(`SubtideX: Found ${subtitles.length} subtitle entries`);
     
-    // Convert to CSV format
+    lastExtractionMeta = {
+      count: subtitles.length,
+      filename: `${sanitizeFilename(videoTitle)}.csv`,
+    };
+    
+    setExtractionStep(3, 'Saving CSV to Downloads…');
     const csvData = convertToCSV(subtitles);
     
-    // Send to background script for download
     chrome.runtime.sendMessage({
       action: "downloadCSV", 
       data: csvData,
@@ -210,10 +500,10 @@ async function extractAndProcessSubtitles() {
         showNotification(`Error: ${response.error}`, "error");
       } else if (response.status === "success") {
         console.log("SubtideX: Download request sent successfully with ID:", response.downloadId);
-        showNotification("Subtitles downloaded successfully!", "success");
+        showSuccessToast(lastExtractionMeta);
       } else {
         console.warn("SubtideX: Unknown response status:", response.status);
-        showNotification("Subtitles processed, check your downloads folder.", "info");
+        showNotification("Captions processed — check your Downloads folder.", "info");
       }
       
       // Reset extraction state
@@ -294,38 +584,104 @@ function extractVideoId(url) {
  * Extracts subtitles from a YouTube video
  * Uses multiple strategies to handle various YouTube layouts and subtitle formats
  */
+function captionUrlRequiresPoToken(url) {
+  return String(url || '').includes('exp=xpe');
+}
+
 async function getYouTubeSubtitles() {
-  console.log("SubtideX: Starting subtitle extraction");
-  
+  console.log("SubtideX: Starting subtitle extraction (transcript panel first)");
+  let lastError = null;
+
   try {
-    // Strategy 1: Access subtitle data from video player
-    const ytplayer = await getYouTubePlayerData();
-    if (ytplayer && ytplayer.captions && ytplayer.captions.playerCaptionsTracklistRenderer) {
-      console.log("SubtideX: Found subtitle data in ytplayer");
-      return await extractFromPlayerData(ytplayer);
+    // Primary: open the right-side transcript panel and scrape visible captions
+    setLoadingTexts({ messageText: 'Opening YouTube transcript panel...', step: 1 });
+    const panelSubs = await extractFromTranscriptPanel();
+    if (panelSubs?.length) {
+      console.log(`SubtideX: Extracted ${panelSubs.length} entries from transcript panel`);
+      return panelSubs;
     }
-    
-    // Strategy 2: Look for caption track in page source
-    const captionTrack = await findCaptionTrackInPage();
-    if (captionTrack) {
-      console.log("SubtideX: Found caption track in page source");
-      return await fetchAndParseCaptionTrack(captionTrack);
-    }
-    
-    // Strategy 3: Extract directly from video element's textTracks
-    const videoTextTracks = await extractFromVideoTextTracks();
-    if (videoTextTracks && videoTextTracks.length > 0) {
-      console.log("SubtideX: Extracted textTracks from video element");
-      return videoTextTracks;
-    }
-    
-    // If we've reached this point, we couldn't find subtitles
-    console.log("SubtideX: No subtitles found using any strategy");
-    throw new Error("No subtitles found for this video");
-  } catch (error) {
-    console.error("SubtideX: Error extracting subtitles:", error);
-    throw error;
+  } catch (e) {
+    lastError = e;
+    console.warn("SubtideX: Transcript panel extraction failed:", e);
   }
+
+  // Fallback: player caption tracks (skip token-gated exp=xpe URLs)
+  try {
+    setLoadingTexts({ messageText: 'Trying YouTube player caption data...' });
+    const ytplayer = await withTimeout(
+      getYouTubePlayerData(),
+      8000,
+      'Timed out reading YouTube player data'
+    );
+    const captionTracks =
+      ytplayer?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+    const poTokenOnly =
+      captionTracks.length > 0 &&
+      captionTracks.every((t) => captionUrlRequiresPoToken(t.baseUrl || t.url));
+
+    if (!poTokenOnly && ytplayer?.captions?.playerCaptionsTracklistRenderer) {
+      try {
+        return await extractFromPlayerData(ytplayer);
+      } catch (e) {
+        lastError = e;
+        console.warn("SubtideX: Player-data captions failed:", e);
+      }
+    }
+
+    if (!poTokenOnly) {
+      const videoTextTracks = await extractFromVideoTextTracks();
+      if (videoTextTracks?.length) return videoTextTracks;
+    }
+  } catch (e) {
+    lastError = e;
+    console.warn("SubtideX: Fallback caption extraction failed:", e);
+  }
+
+  console.log("SubtideX: No subtitles found using any strategy");
+  const detail = lastError?.message ? ` ${lastError.message}` : '';
+  throw new Error(
+    "No subtitles found for this video." + detail +
+    " Open ⋯ → Show transcript on the video, wait for lines to appear, then retry."
+  );
+}
+
+/**
+ * Extract a balanced JSON object starting at `{` in a larger string.
+ */
+function extractBalancedJson(text, startIndex) {
+  if (!text || text[startIndex] !== '{') return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = startIndex; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return text.slice(startIndex, i + 1);
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -343,17 +699,38 @@ async function getYouTubePlayerData() {
       return resolve(window.ytInitialPlayerResponse);
     }
     
-    // Try to find player data in page source
-    const pageSource = document.documentElement.innerHTML;
-    const ytInitialDataMatch = pageSource.match(/ytInitialPlayerResponse\s*=\s*({.+?});/);
-    
-    if (ytInitialDataMatch && ytInitialDataMatch[1]) {
-      try {
-        const ytData = JSON.parse(ytInitialDataMatch[1]);
-        return resolve(ytData);
-      } catch (e) {
-        console.error("SubtideX: Failed to parse ytInitialPlayerResponse", e);
+    // Try to find player data in script tags (avoid scanning full HTML, which can be slow/hang)
+    try {
+      const scripts = Array.from(document.scripts || []);
+      for (const s of scripts) {
+        const txt = s.textContent || '';
+        if (!txt.includes('ytInitialPlayerResponse')) continue;
+
+        // Common patterns in YouTube watch pages
+        const patterns = [
+          /ytInitialPlayerResponse\s*=\s*(\{)/,
+          /var\s+ytInitialPlayerResponse\s*=\s*(\{)/,
+          /window\["ytInitialPlayerResponse"\]\s*=\s*(\{)/,
+        ];
+
+        for (const pattern of patterns) {
+          const match = txt.match(pattern);
+          if (!match || match.index == null) continue;
+
+          const startIndex = match.index + match[0].length - 1;
+          const jsonStr = extractBalancedJson(txt, startIndex);
+          if (!jsonStr) continue;
+
+          try {
+            const ytData = JSON.parse(jsonStr);
+            return resolve(ytData);
+          } catch (e) {
+            console.error("SubtideX: Failed to parse ytInitialPlayerResponse from script", e);
+          }
+        }
       }
+    } catch (e) {
+      console.error("SubtideX: Error scanning scripts for ytInitialPlayerResponse", e);
     }
     
     // If we can't find it, resolve with null
@@ -366,25 +743,22 @@ async function getYouTubePlayerData() {
  */
 async function extractFromPlayerData(playerData) {
   try {
-    // Navigate through the response structure to find captions
-    const captions = playerData.captions?.playerCaptionsTracklistRenderer?.captionTracks || 
-                    playerData.captionTracks || 
-                    [];
-    
-    if (!captions || captions.length === 0) {
+    const captions =
+      playerData.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
+      playerData.captionTracks ||
+      [];
+
+    if (!captions.length) {
       throw new Error("No caption tracks found in player data");
     }
-    
-    // Get the first caption track URL (usually the default language)
-    const captionTrack = captions[0];
-    const captionUrl = captionTrack.baseUrl || captionTrack.url;
-    
-    if (!captionUrl) {
-      throw new Error("Caption URL not found");
+
+    for (const captionTrack of captions) {
+      const captionUrl = captionTrack.baseUrl || captionTrack.url;
+      if (!captionUrl || captionUrlRequiresPoToken(captionUrl)) continue;
+      return await fetchAndParseCaptionTrack(captionUrl);
     }
-    
-    // Fetch the caption track
-    return await fetchAndParseCaptionTrack(captionUrl);
+
+    throw new Error("Caption tracks require YouTube session token (exp=xpe)");
   } catch (error) {
     console.error("SubtideX: Error extracting from player data:", error);
     throw error;
@@ -395,24 +769,133 @@ async function extractFromPlayerData(playerData) {
  * Finds caption track URL in page source
  */
 async function findCaptionTrackInPage() {
-  const pageSource = document.documentElement.innerHTML;
-  
-  // Various patterns to match caption URLs
+  // Avoid scanning full document HTML (can be huge and slow). Prefer scanning script tags.
   const patterns = [
-    /"captionTracks":\[{"baseUrl":"([^"]+)"/, // Standard format
-    /captionTracks':\[{.*?'baseUrl':\s*'([^']+)'/, // Alternative format
-    /timedtext\?.*?":'(https:\/\/www.youtube.com\/api\/timedtext[^']+)'/, // Timed text API
-    /playerCaptionsTracklistRenderer.*?baseUrl":"([^"]+)"/ // Player captions renderer
+    /"captionTracks":\[\{"baseUrl":"([^"]+)"/, // Standard format
+    /playerCaptionsTracklistRenderer.*?baseUrl":"([^"]+)"/, // Player captions renderer
+    /"(https:\/\/www\.youtube\.com\/api\/timedtext[^"]+)"/ // timedtext url embedded
   ];
-  
+
+  try {
+    const scripts = Array.from(document.scripts || []);
+    for (const s of scripts) {
+      const txt = s.textContent || '';
+      if (!txt.includes('captionTracks') && !txt.includes('/api/timedtext')) continue;
   for (const pattern of patterns) {
-    const match = pageSource.match(pattern);
-    if (match && match[1]) {
-      return match[1].replace(/\\u0026/g, '&');
+        const match = txt.match(pattern);
+        if (match && match[1]) {
+          const url = match[1].replace(/\\u0026/g, '&');
+          if (!captionUrlRequiresPoToken(url)) return url;
+        }
+      }
     }
+  } catch (e) {
+    console.warn("SubtideX: Error scanning scripts for caption URLs:", e);
   }
   
   return null;
+}
+
+/**
+ * Fetch a URL from the page "main world" context (youtube.com first-party),
+ * so cookies/consent flows work reliably. Content-script fetches can be treated
+ * as cross-site and get HTML responses instead of captions.
+ */
+function ensureSubtidexPageFetchBridge() {
+  if (document.getElementById('subtidex-page-fetch-bridge')) return;
+
+  const script = document.createElement('script');
+  script.id = 'subtidex-page-fetch-bridge';
+  script.textContent = `
+    (() => {
+      if (window.__SUBTIDEX_PAGE_FETCH_BRIDGE__) return;
+      window.__SUBTIDEX_PAGE_FETCH_BRIDGE__ = true;
+
+      window.addEventListener('message', async (event) => {
+        if (event.source !== window) return;
+        const data = event.data;
+        if (!data || data.source !== 'subtidex' || data.type !== 'fetch') return;
+
+        const { id, url, options } = data;
+        try {
+          const resp = await fetch(url, {
+            ...(options || {}),
+            credentials: 'include',
+            redirect: 'follow'
+          });
+          const text = await resp.text();
+          window.postMessage({
+            source: 'subtidex',
+            type: 'fetchResult',
+            id,
+            ok: resp.ok,
+            status: resp.status,
+            statusText: resp.statusText,
+            url: resp.url,
+            contentType: resp.headers.get('content-type') || '',
+            body: text
+          }, '*');
+        } catch (e) {
+          window.postMessage({
+            source: 'subtidex',
+            type: 'fetchResult',
+            id,
+            ok: false,
+            error: (e && (e.message || String(e))) || 'Unknown error'
+          }, '*');
+        }
+      }, false);
+    })();
+  `;
+
+  (document.documentElement || document.head).appendChild(script);
+}
+
+function fetchTextViaPageContext(url, options = {}) {
+  ensureSubtidexPageFetchBridge();
+
+  return new Promise((resolve, reject) => {
+    const id = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const timeoutMs = 15000;
+
+    function onMessage(event) {
+      if (event.source !== window) return;
+      const data = event.data;
+      if (!data || data.source !== 'subtidex' || data.type !== 'fetchResult' || data.id !== id) return;
+      window.removeEventListener('message', onMessage);
+      clearTimeout(timer);
+
+      if (data.error) return reject(new Error(data.error));
+      resolve({
+        response: {
+          ok: !!data.ok,
+          status: data.status,
+          statusText: data.statusText,
+          url: data.url
+        },
+        contentType: data.contentType || '',
+        rawBody: data.body || ''
+      });
+    }
+
+    const timer = setTimeout(() => {
+      window.removeEventListener('message', onMessage);
+      reject(new Error('Timed out fetching captions via page context'));
+    }, timeoutMs);
+
+    window.addEventListener('message', onMessage);
+
+    window.postMessage(
+      {
+        source: 'subtidex',
+        type: 'fetch',
+        id,
+        url,
+        options
+      },
+      '*'
+    );
+  });
 }
 
 /**
@@ -420,102 +903,355 @@ async function findCaptionTrackInPage() {
  */
 async function fetchAndParseCaptionTrack(captionUrl) {
   try {
+    if (captionUrlRequiresPoToken(captionUrl)) {
+      throw new Error('Caption URL requires YouTube session token (exp=xpe)');
+    }
+
     console.log("SubtideX: Fetching caption track from:", captionUrl);
     
-    // Add format=json3 if not present
-    if (!captionUrl.includes('format=')) {
-      captionUrl += (captionUrl.includes('?') ? '&' : '?') + 'format=json3';
-    }
-    
-    const response = await fetch(captionUrl);
-    
-    if (!response.ok) {
-      throw new Error(`Failed to fetch captions: ${response.status} ${response.statusText}`);
-    }
-    
-    // Check content type to determine how to parse
-    const contentType = response.headers.get('content-type');
-    
-    if (contentType && contentType.includes('application/json')) {
-      // Parse JSON format
-      const json = await response.json();
-      
-      if (json.events) {
-        return json.events
-          .filter(event => event.segs && event.tStartMs !== undefined)
-          .map(event => ({
-            start: event.tStartMs / 1000,
-            duration: (event.dDurationMs || 0) / 1000,
-            text: event.segs?.map(seg => seg.utf8 || '').join('').trim() || ''
-          }))
-          .filter(subtitle => subtitle.text);
+    // Prefer json3, but only if no explicit format is already set.
+    // YouTube commonly uses `fmt=json3` (not `format=json3`).
+    let resolvedUrl = captionUrl;
+    let didAddFmt = false;
+    try {
+      const urlObj = new URL(captionUrl);
+      const hasFmt = urlObj.searchParams.has('fmt');
+      const hasFormat = urlObj.searchParams.has('format');
+      if (!hasFmt && !hasFormat) {
+        urlObj.searchParams.set('fmt', 'json3');
+        didAddFmt = true;
       }
-    } else if (contentType && contentType.includes('text/xml')) {
-      // Parse XML format
-      const text = await response.text();
-      const parser = new DOMParser();
-      const xml = parser.parseFromString(text, 'text/xml');
-      
-      const subtitles = [];
-      const textElements = xml.getElementsByTagName('text');
-      
-      for (let i = 0; i < textElements.length; i++) {
-        const element = textElements[i];
-        const start = parseFloat(element.getAttribute('start') || '0');
-        const duration = parseFloat(element.getAttribute('dur') || '0');
-        const text = element.textContent?.trim() || '';
-        
-        if (text) {
-          subtitles.push({ start, duration, text });
+      resolvedUrl = urlObj.toString();
+    } catch {
+      // If captionUrl isn't a valid absolute URL, fall back to string manipulation.
+      if (!resolvedUrl.includes('fmt=') && !resolvedUrl.includes('format=')) {
+        resolvedUrl += (resolvedUrl.includes('?') ? '&' : '?') + 'fmt=json3';
+        didAddFmt = true;
+      }
+    }
+
+    async function fetchText(url) {
+      // In a content script, fetch may not include YouTube cookies by default.
+      // Without credentials, YouTube can respond with an HTML consent/login page
+      // even for timedtext endpoints.
+      const controller = new AbortController();
+      const timeoutMs = 12000;
+      const t = setTimeout(() => controller.abort(), timeoutMs);
+
+      const baseOptions = {
+        credentials: 'include',
+        cache: 'no-store',
+        redirect: 'follow',
+        referrer: window.location.href,
+        referrerPolicy: 'strict-origin-when-cross-origin',
+        signal: controller.signal
+      };
+
+      // Prefer background fetch for timedtext URLs, but DO NOT accept an empty body as success.
+      // Extensions are often treated as third-party, so cookies may not be sent and responses can be stripped/empty.
+      if (url.includes('://www.youtube.com/api/timedtext')) {
+        try {
+          const bg = await sendMessageAsync({ action: "fetchText", url });
+          if (bg?.status === "success" && bg.result) {
+            const body = bg.result.body || '';
+            if (body.trim().length > 0) {
+              return {
+                response: {
+                  ok: !!bg.result.ok,
+                  status: bg.result.status,
+                  statusText: bg.result.statusText,
+                  url: bg.result.url
+                },
+                contentType: bg.result.contentType || '',
+                rawBody: body
+              };
+            }
+          }
+        } catch (e) {
+          console.warn("SubtideX: background fetchText failed:", e);
         }
+
+        // If background fetch returns empty, try MAIN world fetch (best chance to include cookies and body).
+        try {
+          const mw = await sendMessageAsync({ action: "fetchViaMainWorld", url });
+          const body = mw?.result?.body || '';
+          if (mw?.status === "success" && body.trim().length > 0) {
+            return {
+              response: {
+                ok: !!mw.result.ok,
+                status: mw.result.status,
+                statusText: mw.result.statusText,
+                url: mw.result.url
+              },
+              contentType: mw.result.contentType || '',
+              rawBody: body
+            };
+          }
+        } catch (e) {
+          console.warn("SubtideX: fetchViaMainWorld fallback failed:", e);
+        }
+      }
+
+      let response;
+      try {
+        response = await fetch(url, baseOptions);
+      } finally {
+        clearTimeout(t);
+      }
+      const contentType = response.headers.get('content-type') || '';
+      const rawBody = await response.text();
+
+      // If YouTube returns HTML here, retry in page context (first-party cookies).
+      const lower = (rawBody || '').trim().toLowerCase();
+      const looksLikeHtml =
+        contentType.includes('text/html') ||
+        lower.startsWith('<!doctype html') ||
+        lower.startsWith('<html');
+
+      // If body is empty but content-type suggests HTML, the body may be blocked/stripped.
+      const looksStripped = looksLikeHtml && (rawBody || '').trim().length === 0;
+
+      if ((looksLikeHtml || looksStripped) && url.includes('://www.youtube.com/api/timedtext')) {
+        // Best-effort: fetch via MAIN world through background scripting (bypasses CORB/CSP edge cases).
+        try {
+          const res = await sendMessageAsync({ action: "fetchViaMainWorld", url });
+          if (res?.status === "success" && res.result) {
+            return {
+              response: {
+                ok: !!res.result.ok,
+                status: res.result.status,
+                statusText: res.result.statusText,
+                url: res.result.url
+              },
+              contentType: res.result.contentType || '',
+              rawBody: res.result.body || ''
+            };
+          }
+        } catch (e) {
+          console.warn("SubtideX: fetchViaMainWorld failed:", e);
+        }
+
+        try {
+          return await fetchTextViaPageContext(url, baseOptions);
+        } catch (e) {
+          // Fall back to the original (HTML) response, so we can include it in the error.
+          console.warn('SubtideX: Page-context caption fetch failed:', e);
+        }
+      }
+
+      return { response, contentType, rawBody };
+    }
+
+    function normalizeBody(rawBody) {
+      return (rawBody || '').trim().replace(/^\)\]\}'\s*\n?/, ''); // strip common XSSI prefix
+    }
+
+    function parseVttTimestampToSeconds(ts) {
+      // Supports: HH:MM:SS.mmm or MM:SS.mmm
+      const trimmed = (ts || '').trim();
+      const parts = trimmed.split(':');
+      if (parts.length < 2 || parts.length > 3) return null;
+      const hasHours = parts.length === 3;
+      const [hStr, mStr, sStr] = hasHours ? parts : ['0', parts[0], parts[1]];
+      const secParts = sStr.split('.');
+      const s = Number(secParts[0]);
+      const ms = Number((secParts[1] || '0').padEnd(3, '0').slice(0, 3));
+      const h = Number(hStr);
+      const m = Number(mStr);
+      if (![h, m, s, ms].every(n => Number.isFinite(n))) return null;
+      return h * 3600 + m * 60 + s + ms / 1000;
+    }
+
+    function parseWebVtt(vttText) {
+      const lines = (vttText || '').replace(/\r\n/g, '\n').split('\n');
+      const subtitles = [];
+
+      let i = 0;
+      // Skip WEBVTT header and metadata until first blank line
+      while (i < lines.length && lines[i].trim() !== '') i++;
+      while (i < lines.length && lines[i].trim() === '') i++;
+
+      while (i < lines.length) {
+        // Optional cue identifier line
+        if (lines[i] && !lines[i].includes('-->') && lines[i + 1] && lines[i + 1].includes('-->')) {
+          i++;
+        }
+
+        const timingLine = (lines[i] || '').trim();
+        if (!timingLine.includes('-->')) {
+          i++;
+          continue;
+        }
+
+        const [startRaw, endRawWithSettings] = timingLine.split('-->').map(s => s.trim());
+        const endRaw = (endRawWithSettings || '').split(/\s+/)[0];
+        const start = parseVttTimestampToSeconds(startRaw);
+        const end = parseVttTimestampToSeconds(endRaw);
+
+        i++;
+        const textLines = [];
+        while (i < lines.length && lines[i].trim() !== '') {
+          textLines.push(lines[i]);
+          i++;
+        }
+        while (i < lines.length && lines[i].trim() === '') i++;
+
+        if (start == null || end == null) continue;
+        const text = textLines.join('\n').trim();
+        if (!text) continue;
+        subtitles.push({ start, duration: Math.max(0, end - start), text });
       }
       
       return subtitles;
-    } else {
-      // Try to parse as JSON anyway (YouTube sometimes sends incorrect content-type)
+    }
+
+    function tryParseFromBody(body) {
+      // 0) WebVTT is common for some caption endpoints
+      if (body.startsWith('WEBVTT')) {
+        const vttSubs = parseWebVtt(body);
+        if (vttSubs.length > 0) return vttSubs;
+      }
+
+      // 1) Try JSON (json3) first
       try {
-        const json = await response.json();
-        
-        if (json.events) {
-          return json.events
-            .filter(event => event.segs && event.tStartMs !== undefined)
+        const json = JSON.parse(body);
+        if (json && Array.isArray(json.events)) {
+          const subtitles = json.events
+            .filter(event => event && event.segs && event.tStartMs !== undefined)
             .map(event => ({
               start: event.tStartMs / 1000,
               duration: (event.dDurationMs || 0) / 1000,
-              text: event.segs?.map(seg => seg.utf8 || '').join('').trim() || ''
+              text: (event.segs || []).map(seg => seg.utf8 || '').join('').trim()
             }))
             .filter(subtitle => subtitle.text);
+
+          if (subtitles.length > 0) return subtitles;
         }
-      } catch (e) {
-        // Last resort: Try to parse as XML
-        try {
-          const text = await response.text();
+      } catch {
+        // Not JSON; continue to XML parsing.
+      }
+
+      // 2) Try XML timedtext format (including SRV3)
+      try {
           const parser = new DOMParser();
-          const xml = parser.parseFromString(text, 'text/xml');
+        const xml = parser.parseFromString(body, 'text/xml');
+        // Detect parse errors
+        if (xml.getElementsByTagName('parsererror').length > 0) {
+          throw new Error('XML parsererror');
+        }
           
           const subtitles = [];
           const textElements = xml.getElementsByTagName('text');
-          
           for (let i = 0; i < textElements.length; i++) {
             const element = textElements[i];
             const start = parseFloat(element.getAttribute('start') || '0');
             const duration = parseFloat(element.getAttribute('dur') || '0');
-            const text = element.textContent?.trim() || '';
-            
-            if (text) {
+          const text = (element.textContent || '').trim();
+          if (text) subtitles.push({ start, duration, text });
+        }
+
+        // SRV3/SRV1 often uses <p t="ms" d="ms"> with nested <s> tokens
+        if (subtitles.length === 0) {
+          const pElements = xml.getElementsByTagName('p');
+          for (let i = 0; i < pElements.length; i++) {
+            const element = pElements[i];
+
+            const tMs = Number(element.getAttribute('t'));
+            const dMs = Number(element.getAttribute('d'));
+
+            // TTML-like attributes (less common, but shows up)
+            const begin = element.getAttribute('begin');
+            const end = element.getAttribute('end');
+
+            let start = Number.isFinite(tMs) ? tMs / 1000 : null;
+            let duration = Number.isFinite(dMs) ? dMs / 1000 : null;
+
+            if (start == null && begin) start = parseVttTimestampToSeconds(begin);
+            if ((duration == null || duration === 0) && end && start != null) {
+              const endSeconds = parseVttTimestampToSeconds(end);
+              if (endSeconds != null) duration = Math.max(0, endSeconds - start);
+            }
+
+            if (start == null) continue;
+            if (duration == null) duration = 0;
+
+            const text = (element.textContent || '').trim();
+            if (!text) continue;
               subtitles.push({ start, duration, text });
             }
           }
           
-          return subtitles;
+        if (subtitles.length > 0) return subtitles;
         } catch (xmlError) {
           console.error("SubtideX: Failed to parse as XML:", xmlError);
-          throw new Error("Failed to parse caption track");
+      }
+
+      return null;
+    }
+
+    const candidateUrls = [];
+    candidateUrls.push(resolvedUrl);
+    if (resolvedUrl !== captionUrl) candidateUrls.push(captionUrl);
+
+    // If we injected fmt=json3 and got HTML, try common alternatives explicitly.
+    if (didAddFmt) {
+      try {
+        const urlObj = new URL(captionUrl);
+        if (!urlObj.searchParams.has('fmt') && !urlObj.searchParams.has('format')) {
+          urlObj.searchParams.set('fmt', 'srv3');
+          candidateUrls.push(urlObj.toString());
+          urlObj.searchParams.set('fmt', 'vtt');
+          candidateUrls.push(urlObj.toString());
         }
+      } catch {
+        // ignore
       }
     }
-    
-    throw new Error("No subtitles found in the caption track");
+
+    let lastMeta = null;
+    for (const url of candidateUrls) {
+      const { response, contentType, rawBody } = await fetchText(url);
+      const body = normalizeBody(rawBody);
+      lastMeta = { response, contentType, body };
+
+      if (!response.ok) continue;
+
+      const subtitles = tryParseFromBody(body);
+      if (subtitles && subtitles.length > 0) return subtitles;
+
+      // If this candidate returned HTML, keep trying other candidates.
+      const lower = body.toLowerCase();
+      if (lower.startsWith('<!doctype html') || lower.startsWith('<html')) continue;
+    }
+
+    // If we got here, we couldn't extract anything useful
+    if (lastMeta) {
+      const { response, contentType, body } = lastMeta;
+      const lower = (body || '').toLowerCase();
+      const isHtml =
+        (contentType || '').includes('text/html') ||
+        lower.startsWith('<!doctype html') ||
+        lower.startsWith('<html');
+
+      if (isHtml) {
+        const finalUrl = response?.url || '';
+        const snippetRaw = (body || '').slice(0, 280);
+        const snippet = snippetRaw.replace(/\s+/g, ' ').trim();
+
+        throw new Error(
+          `Failed to parse caption track (YouTube returned an HTML page; status: ${response?.status ?? 'unknown'}). ` +
+          `This is usually consent/login/rate-limit/anti-bot. url: ${finalUrl || 'unknown'}` +
+          ` First bytes: "${snippet || '<empty body>'}"`
+        );
+      }
+
+      const snippet = body.slice(0, 220).replace(/\s+/g, ' ').trim();
+      throw new Error(
+        `Failed to parse caption track (content-type: ${contentType || 'unknown'}).${response?.url ? ` url: ${response.url}` : ''}${snippet ? ` First bytes: "${snippet}"` : ''}`
+      );
+    }
+
+    throw new Error("Failed to parse caption track");
   } catch (error) {
     console.error("SubtideX: Error fetching caption track:", error);
     throw error;
@@ -536,50 +1272,721 @@ async function extractFromVideoTextTracks() {
     
     console.log("SubtideX: Found video element with", videoElement.textTracks.length, "text tracks");
     
-    // Try to find an active track
+    // Prefer a track that is already showing; otherwise try the first track.
     let activeTrack = null;
-    
     for (let i = 0; i < videoElement.textTracks.length; i++) {
       const track = videoElement.textTracks[i];
-      
       if (track.mode === 'showing') {
         activeTrack = track;
         break;
       }
     }
-    
-    // If no active track, use the first one
-    if (!activeTrack && videoElement.textTracks.length > 0) {
-      activeTrack = videoElement.textTracks[0];
-      activeTrack.mode = 'showing'; // Activate it
+    if (!activeTrack) activeTrack = videoElement.textTracks[0];
+    if (!activeTrack) return resolve(null);
+
+    // Ensure cues can load without necessarily rendering captions UI.
+    // 'hidden' still loads cues in many browsers.
+    try {
+      if (activeTrack.mode === 'disabled') activeTrack.mode = 'hidden';
+    } catch {
+      // ignore
     }
-    
-    if (!activeTrack) {
-      return resolve(null);
-    }
-    
-    // We need to wait for cues to load
-    setTimeout(() => {
-      if (!activeTrack.cues || activeTrack.cues.length === 0) {
-        return resolve(null);
-      }
-      
-      // Convert cues to our subtitle format
+
+    const timeoutMs = 10000;
+    const startedAt = Date.now();
+
+    const finish = () => {
+      const cues = activeTrack.cues;
+      if (!cues || cues.length === 0) return resolve(null);
+
       const subtitles = [];
-      
-      for (let i = 0; i < activeTrack.cues.length; i++) {
-        const cue = activeTrack.cues[i];
-        
+      for (let i = 0; i < cues.length; i++) {
+        const cue = cues[i];
+        const text = (cue.text || '').trim();
+        if (!text) continue;
         subtitles.push({
           start: cue.startTime,
           duration: cue.endTime - cue.startTime,
-          text: cue.text.trim()
+          text
         });
       }
-      
-      resolve(subtitles);
-    }, 1000); // Give it a second to load cues
+      resolve(subtitles.length > 0 ? subtitles : null);
+    };
+
+    const onCueChange = () => {
+      const cues = activeTrack.cues;
+      if (cues && cues.length > 0) {
+        cleanup();
+        finish();
+      }
+    };
+
+    const poll = () => {
+      const elapsed = Date.now() - startedAt;
+      const cues = activeTrack.cues;
+      if (cues && cues.length > 0) {
+        cleanup();
+        return finish();
+      }
+      if (elapsed >= timeoutMs) {
+        cleanup();
+        return resolve(null);
+      }
+      setTimeout(poll, 250);
+    };
+
+    const cleanup = () => {
+      try {
+        activeTrack.removeEventListener('cuechange', onCueChange);
+      } catch {
+        // ignore
+      }
+    };
+
+    try {
+      activeTrack.addEventListener('cuechange', onCueChange);
+    } catch {
+      // ignore
+    }
+    poll();
   });
+}
+
+function parseYouTubeTimestampToSeconds(ts) {
+  const trimmed = (ts || '').trim();
+  if (!trimmed) return null;
+  const parts = trimmed.split(':').map(p => p.trim());
+  if (parts.length < 2 || parts.length > 3) return null;
+  const [hStr, mStr, sStr] = parts.length === 3 ? parts : ['0', parts[0], parts[1]];
+  const h = Number(hStr);
+  const m = Number(mStr);
+  const s = Number(parseFloat(sStr));
+  if (![h, m, s].every(n => Number.isFinite(n))) return null;
+  return h * 3600 + m * 60 + s;
+}
+
+const TRANSCRIPT_TIMESTAMP_RE = /^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?$/;
+
+function extractTimestampFromSegmentRow(row) {
+  if (!row) return null;
+
+  const tsCandidates = [
+    row.querySelector?.('.segment-timestamp'),
+    row.querySelector?.('[class*="segment-timestamp"]'),
+    row.querySelector?.('button'),
+  ].filter(Boolean);
+
+  for (const el of tsCandidates) {
+    const text = (el.textContent || '').trim();
+    if (TRANSCRIPT_TIMESTAMP_RE.test(text)) return text;
+  }
+
+  const full = (row.textContent || '').trim();
+  const inline = full.match(/^(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s+/);
+  return inline?.[1] || null;
+}
+
+function isTranscriptSegmentsContainer(container) {
+  if (!container || container.id !== 'segments-container') return false;
+  return Boolean(
+    container.closest('ytd-transcript-search-panel-renderer') ||
+      container.closest('ytd-transcript-renderer') ||
+      container.closest('[target-id*="transcript"]') ||
+      container.closest('#panels')
+  );
+}
+
+function countTranscriptSegmentNodes() {
+  return deepQueryAll(
+    document,
+    (el) =>
+      el.classList?.contains('segment-text') ||
+      (el.tagName || '').toLowerCase() === 'transcript-segment-view-model' ||
+      (el.tagName || '').toLowerCase() === 'ytd-transcript-segment-renderer'
+  ).length;
+}
+
+function fillMissingSegmentStarts(segments) {
+  if (!segments.length) return segments;
+  let lastStart = 0;
+  for (const seg of segments) {
+    if (seg.start == null || seg.start < 0) {
+      seg.start = lastStart + 1;
+    }
+    lastStart = seg.start;
+  }
+  return segments;
+}
+
+function scrapeTranscriptFromSegmentsContainer() {
+  const containers = deepQueryAll(document, (el) => isTranscriptSegmentsContainer(el));
+  let bestSegments = [];
+
+  for (const container of containers) {
+    const segments = [];
+
+    for (const child of container.children) {
+      const tag = (child.tagName || '').toUpperCase();
+      if (tag.includes('TRANSCRIPT-SECTION-HEADER')) continue;
+
+      const textEl =
+        child.querySelector?.('.segment-text') ||
+        child.querySelector?.('.yt-core-attributed-string') ||
+        child.querySelector?.('yt-formatted-string');
+
+      let text = (textEl?.textContent || '').trim();
+      if (!text) {
+        const raw = (child.textContent || '').trim();
+        text = raw.replace(/^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\s*/, '').trim();
+      }
+      if (!text) continue;
+
+      const ts = extractTimestampFromSegmentRow(child);
+      const start = parseYouTubeTimestampToSeconds(ts);
+      segments.push({ start: start ?? -1, text });
+    }
+
+    fillMissingSegmentStarts(segments);
+    if (segments.length > bestSegments.length) bestSegments = segments;
+  }
+
+  if (bestSegments.length) {
+    console.log(`SubtideX: segments-container scrape found ${bestSegments.length} segments`);
+  }
+  return segmentsToSubtitleRows(bestSegments);
+}
+
+function scrapeTranscriptViewModels() {
+  const viewModels = deepQueryAll(document, (el) => {
+    const tag = (el.tagName || '').toLowerCase();
+    return tag === 'transcript-segment-view-model';
+  });
+
+  const segments = [];
+  for (const vm of viewModels) {
+    const text = (
+      vm.querySelector?.('.yt-core-attributed-string') ||
+      vm.querySelector?.('.segment-text')
+    )?.textContent?.trim();
+    if (!text) continue;
+
+    const ts = extractTimestampFromSegmentRow(vm);
+    const start = parseYouTubeTimestampToSeconds(ts);
+    segments.push({ start: start ?? -1, text });
+  }
+
+  fillMissingSegmentStarts(segments);
+
+  if (segments.length) {
+    console.log(`SubtideX: transcript-segment-view-model scrape found ${segments.length} segments`);
+  }
+  return segmentsToSubtitleRows(segments);
+}
+
+function* deepElementIterator(root) {
+  // Walk DOM + open shadow roots
+  const stack = [root];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node) continue;
+
+    if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.DOCUMENT_NODE || node.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
+      // Shadow root
+      if (node.shadowRoot) stack.push(node.shadowRoot);
+
+      // Children
+      const children = node.children ? Array.from(node.children) : [];
+      for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+    }
+
+    if (node.nodeType === Node.ELEMENT_NODE) yield node;
+  }
+}
+
+function deepQueryAll(root, predicate) {
+  const out = [];
+  for (const el of deepElementIterator(root)) {
+    try {
+      if (predicate(el)) out.push(el);
+    } catch {
+      // ignore predicate errors
+    }
+  }
+  return out;
+}
+
+async function openYouTubeTranscriptPanel() {
+  const expand =
+    document.querySelector('#expand') ||
+    document.querySelector('tp-yt-paper-button#expand') ||
+    document.querySelector('[aria-label="Show more"]') ||
+    document.querySelector('[aria-label*="Show more"]');
+  if (expand) {
+    expand.click();
+    await sleep(300);
+  }
+
+  const descTranscript = document.querySelector('ytd-video-description-transcript-section-renderer');
+  if (descTranscript) {
+    descTranscript.click();
+    await sleep(600);
+    if (countTranscriptSegmentNodes() > 0 || isTranscriptPanelVisible()) return true;
+  }
+
+  const transcriptButtons = deepQueryAll(document, (el) => {
+    if ((el.tagName || '').toLowerCase() !== 'button') return false;
+    const label = (el.getAttribute('aria-label') || '').toLowerCase();
+    const text = (el.textContent || '').toLowerCase();
+    return (
+      label.includes('transcript') ||
+      label.includes('bản ghi') ||
+      label.includes('phụ đề') ||
+      label.includes('字幕') ||
+      text.includes('transcript') ||
+      text.includes('show transcript')
+    );
+  });
+
+  for (const btn of transcriptButtons) {
+    btn.click();
+    await sleep(600);
+    if (countTranscriptSegmentNodes() > 0 || isTranscriptPanelVisible()) return true;
+  }
+
+  for (const item of document.querySelectorAll('ytd-menu-service-item-renderer')) {
+    const html = item.outerHTML || '';
+    if (
+      html.includes('searchable-transcript') ||
+      html.includes('getTranscriptEndpoint') ||
+      html.includes('engagement-panel-searchable-transcript')
+    ) {
+      item.click();
+      await sleep(600);
+      return true;
+    }
+  }
+
+  const moreButton =
+    document.querySelector('button[aria-label="More actions"]') ||
+    document.querySelector('button[aria-label*="More actions"]') ||
+    deepQueryAll(document, (el) => {
+      if ((el.tagName || '').toLowerCase() !== 'button') return false;
+      const label = (el.getAttribute('aria-label') || '').toLowerCase();
+      return label.includes('more actions') || label.includes('more');
+    })[0];
+
+  if (moreButton) {
+    moreButton.click();
+    await sleep(400);
+  }
+
+  const menuItems = Array.from(
+    document.querySelectorAll(
+      'ytd-menu-service-item-renderer, tp-yt-paper-item, ytd-menu-navigation-item-renderer'
+    )
+  );
+  const transcriptItem = menuItems.find((el) => {
+    const text = (el.textContent || '').trim().toLowerCase();
+    const html = el.outerHTML || '';
+    return (
+      html.includes('searchable-transcript') ||
+      html.includes('getTranscriptEndpoint') ||
+      text.includes('transcript') ||
+      text.includes('transkript') ||
+      text.includes('transcription') ||
+      text.includes('bản ghi') ||
+      text.includes('phụ đề') ||
+      text.includes('hiển thị') ||
+      text.includes('字幕')
+    );
+  });
+
+  if (transcriptItem) {
+    (transcriptItem.closest('ytd-menu-service-item-renderer, tp-yt-paper-item') || transcriptItem).click();
+    await sleep(600);
+    return true;
+  }
+
+  return false;
+}
+
+function findTranscriptPanelRoot() {
+  const selectors = [
+    'ytd-transcript-search-panel-renderer',
+    'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"]',
+    '#engagement-panel-searchable-transcript',
+    'ytd-transcript-renderer',
+    '#panels ytd-engagement-panel-section-list-renderer',
+  ];
+  for (const selector of selectors) {
+    const el = document.querySelector(selector);
+    if (el) return el;
+  }
+
+  const byTargetId = deepQueryAll(document, (el) => {
+    const tid = (el.getAttribute?.('target-id') || '').toLowerCase();
+    return tid.includes('transcript');
+  });
+  if (byTargetId.length) return byTargetId[0];
+
+  const byTag = deepQueryAll(document, (el) => {
+    const tag = (el.tagName || '').toLowerCase();
+    return tag.includes('transcript') && tag.startsWith('ytd-');
+  });
+  if (byTag.length) return byTag[0];
+
+  return (
+    deepQueryAll(document, (el) => el.id === 'engagement-panel-searchable-transcript')[0] ||
+    document.querySelector('#panels') ||
+    null
+  );
+}
+
+function collectTranscriptPanelCandidates() {
+  const candidates = new Set();
+  const add = (el) => {
+    if (el && el.nodeType === Node.ELEMENT_NODE) candidates.add(el);
+  };
+
+  add(findTranscriptPanelRoot());
+  add(document.querySelector('#panels'));
+  add(document.querySelector('#contentScrollable'));
+
+  for (const el of deepQueryAll(document, (node) => {
+    const tid = (node.getAttribute?.('target-id') || '').toLowerCase();
+    return tid.includes('transcript');
+  })) {
+    add(el);
+  }
+
+  for (const el of deepQueryAll(document, (node) => {
+    const tag = (node.tagName || '').toLowerCase();
+    return tag.includes('transcript') && tag.startsWith('ytd-');
+  })) {
+    add(el);
+  }
+
+  return Array.from(candidates);
+}
+
+function parseTranscriptPlainText(text) {
+  if (!text) return [];
+  const lines = text.replace(/\r\n/g, '\n').split('\n').map((l) => l.trim()).filter(Boolean);
+  const segments = [];
+  const TIME_ONLY = /^(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)$/;
+  const INLINE = /^(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s+(.+)$/;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^(transcript|bản ghi|phụ đề|字幕|show transcript|hiển thị)/i.test(line)) continue;
+
+    const inline = line.match(INLINE);
+    if (inline) {
+      const start = parseYouTubeTimestampToSeconds(inline[1]);
+      if (start != null && inline[2].trim()) {
+        segments.push({ start, text: inline[2].trim() });
+      }
+      continue;
+    }
+
+    if (TIME_ONLY.test(line) && lines[i + 1] && !TIME_ONLY.test(lines[i + 1])) {
+      const start = parseYouTubeTimestampToSeconds(line);
+      const caption = lines[i + 1];
+      if (start != null && caption) segments.push({ start, text: caption });
+      i++;
+    }
+  }
+
+  return segments;
+}
+
+function scoreTranscriptPlainText(text) {
+  const lines = (text || '').replace(/\r\n/g, '\n').split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2) return 0;
+  let timestampLines = 0;
+  for (const line of lines) {
+    if (/^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?(\s|$)/.test(line)) timestampLines++;
+  }
+  return timestampLines;
+}
+
+function bruteForceScrapeTranscript() {
+  let bestSegments = [];
+  let bestScore = 0;
+
+  for (const root of collectTranscriptPanelCandidates()) {
+    const text = root.innerText || root.textContent || '';
+    const score = scoreTranscriptPlainText(text);
+    if (score < 2) continue;
+
+    const parsed = parseTranscriptPlainText(text);
+    if (parsed.length > bestSegments.length || (parsed.length === bestSegments.length && score > bestScore)) {
+      bestSegments = parsed;
+      bestScore = score;
+    }
+  }
+
+  // Smallest useful subtree: list items grouped by parent
+  if (bestSegments.length < 3) {
+    const listParents = new Set();
+    for (const item of deepQueryAll(document, (el) => el.getAttribute?.('role') === 'listitem')) {
+      if (item.parentElement) listParents.add(item.parentElement);
+    }
+    for (const parent of listParents) {
+      const text = parent.innerText || parent.textContent || '';
+      const score = scoreTranscriptPlainText(text);
+      if (score < 2) continue;
+      const parsed = parseTranscriptPlainText(text);
+      if (parsed.length > bestSegments.length) bestSegments = parsed;
+    }
+  }
+
+  console.log(`SubtideX: brute-force scrape found ${bestSegments.length} segments (score ${bestScore})`);
+  return segmentsToSubtitleRows(bestSegments);
+}
+
+function isTranscriptPanelVisible() {
+  for (const root of collectTranscriptPanelCandidates()) {
+    if (scoreTranscriptPlainText(root.innerText || '') >= 2) return true;
+  }
+
+  const root = findTranscriptPanelRoot();
+  if (!root) return false;
+  return (
+    deepQueryAll(root, (el) => el.classList?.contains('segment-text')).length > 0 ||
+    deepQueryAll(root, (el) => (el.tagName || '').toLowerCase() === 'ytd-transcript-segment-renderer').length > 0 ||
+    scoreTranscriptPlainText(root.innerText || '') >= 2
+  );
+}
+
+function segmentsToSubtitleRows(segments) {
+  const deduped = [];
+  const seen = new Set();
+  for (const s of segments) {
+    const key = `${s.start}|${s.text}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(s);
+  }
+  deduped.sort((a, b) => a.start - b.start);
+
+  const subtitles = [];
+  for (let i = 0; i < deduped.length; i++) {
+    const current = deduped[i];
+    const next = deduped[i + 1];
+    subtitles.push({
+      start: current.start,
+      duration: next ? Math.max(0, next.start - current.start) : 0,
+      text: current.text,
+    });
+  }
+  return subtitles.length > 0 ? subtitles : null;
+}
+
+async function extractTranscriptSegmentsFromDom() {
+  let subs = scrapeTranscriptFromSegmentsContainer();
+  if (subs?.length) return subs;
+
+  subs = scrapeTranscriptViewModels();
+  if (subs?.length) return subs;
+
+  const TIME_ONLY = /^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?$/;
+  const INLINE_TIME = /^(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s+([\s\S]+)$/;
+
+  const root = findTranscriptPanelRoot() || document;
+  const segments = [];
+
+  // 2026 UI: .segment-text / .segment-timestamp inside transcript panel
+  const segmentTextEls = deepQueryAll(
+    root,
+    (el) =>
+      el.classList?.contains('segment-text') ||
+      (typeof el.className === 'string' && el.className.includes('segment-text'))
+  );
+
+  for (const textEl of segmentTextEls) {
+    const row =
+      textEl.closest('ytd-transcript-segment-renderer') ||
+      textEl.closest('[role="listitem"]') ||
+      textEl.parentElement?.closest?.('ytd-transcript-segment-renderer') ||
+      textEl.parentElement;
+
+    let text = (textEl.textContent || '').trim();
+    let ts = null;
+
+    const tsEl =
+      row?.querySelector?.('.segment-timestamp, [class*="segment-timestamp"], [class*="timestamp"]') ||
+      deepQueryAll(row || textEl.parentElement || document, (el) =>
+        TIME_ONLY.test((el.textContent || '').trim())
+      )[0];
+
+    if (tsEl) ts = (tsEl.textContent || '').trim();
+
+    if (!ts) {
+      const inline = text.match(INLINE_TIME);
+      if (inline) {
+        ts = inline[1];
+        text = inline[2].trim();
+      }
+    }
+
+    const start = parseYouTubeTimestampToSeconds(ts);
+    if (start != null && text) segments.push({ start, text });
+  }
+
+  // Classic: ytd-transcript-segment-renderer rows
+  if (segments.length === 0) {
+    const renderers = deepQueryAll(
+      root,
+      (el) => (el.tagName || '').toLowerCase() === 'ytd-transcript-segment-renderer'
+    );
+
+    for (const renderer of renderers) {
+      const tsEl =
+        renderer.querySelector('.segment-timestamp, [class*="timestamp"]') ||
+        deepQueryAll(renderer, (el) => TIME_ONLY.test((el.textContent || '').trim()))[0];
+      const textEl =
+        renderer.querySelector('.segment-text, [class*="segment-text"], yt-formatted-string');
+
+      let ts = (tsEl?.textContent || '').trim();
+      let text = (textEl?.textContent || '').trim();
+
+      if (!text) {
+        const full = (renderer.textContent || '').trim();
+        text = ts ? full.replace(ts, '').trim() : full;
+      }
+
+      const inline = !ts ? text.match(INLINE_TIME) : null;
+      if (inline) {
+        ts = inline[1];
+        text = inline[2].trim();
+      }
+
+      const start = parseYouTubeTimestampToSeconds(ts);
+      if (start != null && text) segments.push({ start, text });
+    }
+  }
+
+  // Fallback: #segments-container yt-formatted-string pairs
+  if (segments.length === 0) {
+    const container =
+      root.querySelector('#segments-container') ||
+      deepQueryAll(root, (el) => el.id === 'segments-container')[0];
+
+    if (container) {
+      const lines = deepQueryAll(container, (el) => {
+        const tag = (el.tagName || '').toLowerCase();
+        return tag === 'yt-formatted-string' || tag === 'div' || tag === 'span';
+      })
+        .map((el) => (el.textContent || '').trim())
+        .filter(Boolean);
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const inline = line.match(INLINE_TIME);
+        if (inline) {
+          const start = parseYouTubeTimestampToSeconds(inline[1]);
+          if (start != null) segments.push({ start, text: inline[2].trim() });
+          continue;
+        }
+        if (TIME_ONLY.test(line) && lines[i + 1] && !TIME_ONLY.test(lines[i + 1])) {
+          const start = parseYouTubeTimestampToSeconds(line);
+          if (start != null) segments.push({ start, text: lines[i + 1] });
+          i++;
+        }
+      }
+    }
+  }
+
+  return segmentsToSubtitleRows(segments) || bruteForceScrapeTranscript();
+}
+
+async function scrapeAllVisibleTranscriptStrategies() {
+  await scrollTranscriptPanelToLoadAll();
+
+  let subs = await extractTranscriptSegmentsFromDom();
+  if (subs?.length) return subs;
+
+  subs = bruteForceScrapeTranscript();
+  if (subs?.length) return subs;
+
+  const containers = deepQueryAll(document, (el) => isTranscriptSegmentsContainer(el));
+  const segmentTexts = deepQueryAll(document, (el) => el.classList?.contains('segment-text'));
+  console.warn('SubtideX: visible transcript scrape found nothing', {
+    segmentsContainers: containers.length,
+    segmentTextNodes: segmentTexts.length,
+    panelRoot: findTranscriptPanelRoot()?.tagName || null,
+    panelVisible: isTranscriptPanelVisible(),
+  });
+
+  return null;
+}
+
+async function scrollTranscriptPanelToLoadAll() {
+  const containers = deepQueryAll(document, (el) => isTranscriptSegmentsContainer(el));
+
+  if (!containers.length) {
+    const fallback =
+      document.querySelector('ytd-transcript-search-panel-renderer #segments-container') ||
+      document.querySelector('#engagement-panel-searchable-transcript #content') ||
+      findTranscriptPanelRoot();
+    if (fallback) containers.push(fallback);
+  }
+
+  for (const container of containers.slice(0, 2)) {
+    if (typeof container.scrollTop !== 'number') continue;
+
+    let lastCount = 0;
+    let stablePasses = 0;
+
+    for (let i = 0; i < 15; i++) {
+      container.scrollTop = container.scrollHeight;
+      await sleep(100);
+
+      const count = deepQueryAll(
+        container,
+        (el) =>
+          el.classList?.contains('segment-text') ||
+          (el.tagName || '').toLowerCase() === 'ytd-transcript-segment-renderer' ||
+          (el.tagName || '').toLowerCase() === 'transcript-segment-view-model'
+      ).length;
+
+      if (count > lastCount) {
+        lastCount = count;
+        stablePasses = 0;
+      } else {
+        stablePasses++;
+        if (stablePasses >= 2 && count > 0) break;
+      }
+    }
+  }
+}
+
+async function extractFromTranscriptPanel() {
+  if (countTranscriptSegmentNodes() > 0 || isTranscriptPanelVisible()) {
+    setLoadingTexts({ messageText: 'Reading transcript from panel...', step: 2 });
+    const existing = await scrapeAllVisibleTranscriptStrategies();
+    if (existing?.length) return existing;
+  }
+
+  setLoadingTexts({ messageText: 'Opening transcript panel...', step: 1 });
+  await openYouTubeTranscriptPanel();
+
+  for (let attempt = 0; attempt < 25; attempt++) {
+    if (countTranscriptSegmentNodes() > 0 || isTranscriptPanelVisible()) {
+      setLoadingTexts({ messageText: 'Downloading captions from transcript...', step: 2 });
+      const subtitles = await scrapeAllVisibleTranscriptStrategies();
+      if (subtitles?.length) return subtitles;
+    }
+
+    if (attempt === 6 || attempt === 14) {
+      await openYouTubeTranscriptPanel();
+    }
+
+    await sleep(400);
+  }
+
+  return null;
 }
 
 /**
@@ -625,243 +2032,132 @@ function formatTimestamp(seconds) {
 }
 
 /**
- * Shows a loading indicator on the page
+ * Shows the Tidal progress panel (bottom-right)
  */
 function showLoadingIndicator() {
-  // Remove existing indicator if present
   hideLoadingIndicator();
-  
-  // Create container
+  ensureTidalStyles();
+
   loadingIndicator = document.createElement('div');
   loadingIndicator.id = 'subtidex-loading';
-  
-  // Set styles for the loading indicator
-  const style = `
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background-color: rgba(0, 0, 0, 0.5);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    z-index: 9999;
-    color: white;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  loadingIndicator.className = 'subtidex-panel';
+  loadingIndicator.setAttribute('role', 'status');
+  loadingIndicator.setAttribute('aria-live', 'polite');
+
+  loadingIndicator.innerHTML = `
+    <div class="subtidex-panel__card">
+      <div class="subtidex-panel__header">
+        <img class="subtidex-panel__logo" src="${chrome.runtime.getURL('icons/icon48.png')}" alt="">
+        <span class="subtidex-panel__brand">SubtideX</span>
+      </div>
+      <div class="subtidex-panel__detail">Starting…</div>
+      <ul class="subtidex-steps">
+        <li class="subtidex-step subtidex-step--active" data-step="1">
+          <span class="subtidex-step__dot"></span>
+          <span class="subtidex-step__label">Open transcript panel</span>
+        </li>
+        <li class="subtidex-step subtidex-step--pending" data-step="2">
+          <span class="subtidex-step__dot"></span>
+          <span class="subtidex-step__label">Read captions</span>
+        </li>
+        <li class="subtidex-step subtidex-step--pending" data-step="3">
+          <span class="subtidex-step__dot"></span>
+          <span class="subtidex-step__label">Save CSV</span>
+        </li>
+      </ul>
+      <div class="subtidex-progress"><div class="subtidex-progress__bar"></div></div>
+    </div>
   `;
-  
-  loadingIndicator.style.cssText = style;
-  
-  // Create content
-  const content = document.createElement('div');
-  content.style.cssText = `
-    background-color: #1a1a1a;
-    border-radius: 8px;
-    padding: 30px 40px;
-    text-align: center;
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-    max-width: 90%;
-    width: 360px;
-  `;
-  
-  // Add logo
-  const logo = document.createElement('div');
-  logo.innerHTML = `
-    <svg width="80" height="80" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <circle cx="64" cy="64" r="60" fill="#137dc5"/>
-      <path d="M64 30C53.5 30 45 35 45 43C45 65 85 50 85 75C85 85 75 90 64 90C56 90 49 87 45 82" stroke="white" stroke-width="10" stroke-linecap="round"/>
-      <rect x="30" y="100" width="68" height="6" rx="3" fill="white"/>
-      <path d="M64 55L64 78M64 78L54 68M64 78L74 68" stroke="white" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-  `;
-  logo.style.marginBottom = '15px';
-  
-  // Add title and message
-  const title = document.createElement('h2');
-  title.textContent = 'Extracting Subtitles';
-  title.style.cssText = `
-    margin: 0 0 10px 0;
-    font-size: 20px;
-    font-weight: 600;
-    color: white;
-  `;
-  
-  const message = document.createElement('p');
-  message.textContent = 'Please wait while we extract and download the subtitles...';
-  message.style.cssText = `
-    margin: 0 0 20px 0;
-    font-size: 14px;
-    color: #cccccc;
-  `;
-  
-  // Create spinner
-  const spinner = document.createElement('div');
-  spinner.style.cssText = `
-    width: 40px;
-    height: 40px;
-    margin: 0 auto;
-    border: 3px solid rgba(255, 255, 255, 0.3);
-    border-radius: 50%;
-    border-top-color: #137dc5;
-    animation: spin 1s ease-in-out infinite;
-  `;
-  
-  // Add keyframes for spinner animation
-  const keyframes = document.createElement('style');
-  keyframes.textContent = `
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-  `;
-  document.head.appendChild(keyframes);
-  
-  // Assemble the loading indicator
-  content.appendChild(logo);
-  content.appendChild(title);
-  content.appendChild(message);
-  content.appendChild(spinner);
-  loadingIndicator.appendChild(content);
-  
-  // Add dismiss on background click
-  loadingIndicator.addEventListener('click', (e) => {
-    if (e.target === loadingIndicator) {
-      hideLoadingIndicator();
-    }
-  });
-  
-  // Add to DOM
+
+  loadingMessageTextEl = loadingIndicator.querySelector('.subtidex-panel__detail');
+  loadingStepsEl = loadingIndicator.querySelector('.subtidex-steps');
   document.body.appendChild(loadingIndicator);
 }
 
-/**
- * Hides the loading indicator
- */
 function hideLoadingIndicator() {
   const existing = document.getElementById('subtidex-loading');
   if (existing) {
-    existing.remove();
+    existing.style.animation = 'subtidex-panel-out 0.25s ease-in forwards';
+    setTimeout(() => existing.remove(), 250);
   }
   loadingIndicator = null;
+  loadingStatusTextEl = null;
+  loadingMessageTextEl = null;
+  loadingStepsEl = null;
+}
+
+function showSuccessToast({ count, filename } = {}) {
+  dismissNotification();
+  ensureTidalStyles();
+
+  const toast = document.createElement('div');
+  toast.id = 'subtidex-notification';
+  toast.className = 'subtidex-toast subtidex-toast--success';
+  toast.style.position = 'fixed';
+
+  const lines = count
+    ? `${count.toLocaleString()} caption${count === 1 ? '' : 's'} saved`
+    : 'Captions saved';
+
+  toast.innerHTML = `
+    <button class="subtidex-toast__close" type="button" aria-label="Dismiss">×</button>
+    <div class="subtidex-toast__title subtidex-toast__title--success">✓ ${lines}</div>
+    <div class="subtidex-toast__sub">${filename ? `${filename} → Downloads` : 'Check your Downloads folder'}</div>
+    <button class="subtidex-toast__btn" type="button">Download again</button>
+  `;
+
+  toast.querySelector('.subtidex-toast__close').addEventListener('click', () => dismissNotification());
+  toast.querySelector('.subtidex-toast__btn').addEventListener('click', () => {
+    dismissNotification();
+    if (!extractionInProgress) {
+      extractionInProgress = true;
+      extractAndProcessSubtitles();
+    }
+  });
+
+  document.body.appendChild(toast);
+  notificationElement = toast;
+
+  setTimeout(() => dismissNotification(), 8000);
+}
+
+function dismissNotification() {
+  const existing = document.getElementById('subtidex-notification');
+  if (existing) {
+    existing.style.animation = 'subtidex-panel-out 0.25s ease-in forwards';
+    setTimeout(() => existing.remove(), 250);
+  }
+  if (notificationElement === existing) notificationElement = null;
 }
 
 /**
  * Shows a notification message to the user
- * @param {string} message - The message to display
- * @param {string} type - The type of notification: "success", "error", "info"
  */
 function showNotification(message, type = "info") {
-  // Remove any existing notification
-  const existing = document.getElementById('subtidex-notification');
-  if (existing) {
-    existing.remove();
-  }
-  
-  // Determine colors based on type
-  let bgColor, textColor, borderColor, icon;
-  
-  switch (type) {
-    case "success":
-      bgColor = '#27ae60';
-      textColor = 'white';
-      borderColor = '#2ecc71';
-      icon = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
-          <polyline points="22 4 12 14.01 9 11.01"></polyline>
-        </svg>
-      `;
-      break;
-    case "error":
-      bgColor = '#e74c3c';
-      textColor = 'white';
-      borderColor = '#c0392b';
-      icon = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10"></circle>
-          <line x1="15" y1="9" x2="9" y2="15"></line>
-          <line x1="9" y1="9" x2="15" y2="15"></line>
-        </svg>
-      `;
-      break;
-    default: // info
-      bgColor = '#3498db';
-      textColor = 'white';
-      borderColor = '#2980b9';
-      icon = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10"></circle>
-          <line x1="12" y1="16" x2="12" y2="12"></line>
-          <line x1="12" y1="8" x2="12.01" y2="8"></line>
-        </svg>
-      `;
-  }
-  
-  // Create notification element
-  const notification = document.createElement('div');
-  notification.id = 'subtidex-notification';
-  notification.style.cssText = `
-    position: fixed;
-    top: 20px;
-    left: 50%;
-    transform: translateX(-50%);
-    background-color: ${bgColor};
-    color: ${textColor};
-    padding: 12px 20px;
-    border-radius: 8px;
-    z-index: 10000;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    font-size: 14px;
-    max-width: 80%;
-    animation: subtidex-slide-in 0.3s ease-out;
+  dismissNotification();
+  ensureTidalStyles();
+
+  const toast = document.createElement('div');
+  toast.id = 'subtidex-notification';
+  toast.className = `subtidex-toast subtidex-toast--${type === 'success' ? 'success' : type === 'error' ? 'error' : 'info'}`;
+  toast.style.position = 'fixed';
+
+  const titleClass = type === 'success' ? 'subtidex-toast__title--success' : type === 'error' ? 'subtidex-toast__title--error' : '';
+  const prefix = type === 'success' ? '✓' : type === 'error' ? '✕' : 'ℹ';
+
+  toast.innerHTML = `
+    <button class="subtidex-toast__close" type="button" aria-label="Dismiss">×</button>
+    <div class="subtidex-toast__title ${titleClass}">${prefix} ${type === 'error' ? 'Something went wrong' : type === 'success' ? 'Done' : 'SubtideX'}</div>
+    <div class="subtidex-toast__sub"></div>
   `;
-  
-  // Add icon and message
-  notification.innerHTML = `${icon} ${message}`;
-  
-  // Add animation keyframes
-  const keyframes = document.createElement('style');
-  keyframes.textContent = `
-    @keyframes subtidex-slide-in {
-      from { transform: translate(-50%, -20px); opacity: 0; }
-      to { transform: translate(-50%, 0); opacity: 1; }
-    }
-    @keyframes subtidex-slide-out {
-      from { transform: translate(-50%, 0); opacity: 1; }
-      to { transform: translate(-50%, -20px); opacity: 0; }
-    }
-  `;
-  document.head.appendChild(keyframes);
-  
-  // Add to DOM
-  document.body.appendChild(notification);
-  
-  // Store reference to the notification
-  notificationElement = notification;
-  
-  // Auto-remove after 5 seconds (unless it's an error)
-  const timeout = type === "error" ? 8000 : 5000;
-  
-  setTimeout(() => {
-    if (notification.parentNode) {
-      notification.style.animation = 'subtidex-slide-out 0.3s ease-in forwards';
-      
-      // Remove after animation completes
-      setTimeout(() => {
-        if (notification.parentNode) {
-          notification.remove();
-        }
-        if (notificationElement === notification) {
-          notificationElement = null;
-        }
-      }, 300);
-    }
-  }, timeout);
+
+  toast.querySelector('.subtidex-toast__sub').textContent = message;
+  toast.querySelector('.subtidex-toast__close').addEventListener('click', () => dismissNotification());
+
+  document.body.appendChild(toast);
+  notificationElement = toast;
+
+  setTimeout(() => dismissNotification(), type === 'error' ? 9000 : 6000);
 }
 
 /**

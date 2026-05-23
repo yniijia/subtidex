@@ -1,11 +1,16 @@
 {
   "name": "subtidex",
-  "version": "1.3.1",
+  "version": "1.5.0",
   "description": "Extract YouTube subtitles with one click and download as CSV",
   "author": "Tony Fiston <https://github.com/yniijia>",
   "license": "MIT",
+  "scripts": {
+    "build": "rm -rf dist && mkdir -p dist && zip -r dist/subtidex.zip manifest.json background.js content.js innertube-extract.js popup.html popup.js error.html ui/tidal.css icons LICENSE",
+    "clean": "rm -rf dist",
+    "check": "node ./scripts/check.mjs"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/yniijia/subtidex"
+    "url": "https://github.com/yniijia/SubtideX"
   }
 }

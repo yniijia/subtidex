@@ -4,415 +4,84 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SubtideX</title>
-  <style>
-    :root {
-      /* Core brand colors */
-      --primary: #3b82f6;
-      --primary-light: #60a5fa;
-      --primary-dark: #2563eb;
-      --primary-bg: rgba(59, 130, 246, 0.08);
-      --accent: #f59e0b;
-      --accent-dark: #d97706;
-      --error: #ef4444;
-      --success: #10b981;
-      --warn: #f59e0b;
-      
-      /* Neutral colors */
-      --bg: #ffffff;
-      --bg-secondary: #f8fafc;
-      --bg-tertiary: #f1f5f9;
-      --text: #0f172a;
-      --text-light: #64748b;
-      --text-muted: #94a3b8;
-      --text-on-dark: #f8fafc;
-      --border: #e2e8f0;
-      
-      /* UI elements */
-      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-      --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-      --shadow-focus: 0 0 0 3px rgba(59, 130, 246, 0.3);
-      
-      /* Spacing */
-      --space-1: 0.25rem;
-      --space-2: 0.5rem;
-      --space-3: 0.75rem;
-      --space-4: 1rem;
-      --space-6: 1.5rem;
-      --space-8: 2rem;
-      
-      /* Transition */
-      --transition-fast: 150ms;
-      --transition-normal: 250ms;
-      
-      /* Border radius */
-      --radius-sm: 0.25rem;
-      --radius: 0.5rem;
-      --radius-lg: 0.75rem;
-      --radius-full: 9999px;
-      
-      /* Typography */
-      --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    }
-    
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.6; }
-    }
-    
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(5px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    
-    @keyframes slideIn {
-      from { transform: translateX(-10px); opacity: 0; }
-      to { transform: translateX(0); opacity: 1; }
-    }
-    
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-    
-    body {
-      width: 360px;
-      font-family: var(--font-sans);
-      margin: 0;
-      background-color: var(--bg);
-      color: var(--text);
-      line-height: 1.5;
-      font-size: 14px;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-    }
-    
-    .container {
-      display: flex;
-      flex-direction: column;
-      padding: var(--space-6);
-      animation: fadeIn 0.3s ease-out;
-    }
-    
-    .header {
-      display: flex;
-      align-items: center;
-      margin-bottom: var(--space-6);
-    }
-    
-    .logo-container {
-      position: relative;
-      width: 52px;
-      height: 52px;
-      margin-right: var(--space-4);
-      flex-shrink: 0;
-    }
-    
-    .logo {
-      width: 52px;
-      height: 52px;
-      filter: drop-shadow(0px 2px 4px rgba(0, 0, 0, 0.1));
-      transition: transform var(--transition-normal) cubic-bezier(0.34, 1.56, 0.64, 1);
-    }
-    
-    .header:hover .logo {
-      transform: scale(1.05) rotate(5deg);
-    }
-    
-    .title-container {
-      flex: 1;
-    }
-    
-    h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--text);
-      margin: 0;
-      letter-spacing: -0.01em;
-    }
-    
-    .subtitle {
-      font-size: 0.85rem;
-      color: var(--text-light);
-      margin-top: var(--space-1);
-    }
-    
-    .status-section {
-      margin-bottom: var(--space-6);
-    }
-    
-    .status-indicator {
-      display: flex;
-      align-items: center;
-      padding: var(--space-3) var(--space-4);
-      border-radius: var(--radius);
-      font-size: 0.925rem;
-      font-weight: 500;
-      background-color: var(--bg-secondary);
-      margin-bottom: var(--space-4);
-      box-shadow: var(--shadow-sm);
-      transition: all var(--transition-normal);
-      animation: slideIn 0.3s ease-out;
-    }
-    
-    .status-indicator:before {
-      content: "";
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      border-radius: var(--radius-full);
-      margin-right: 10px;
-      position: relative;
-      transition: all var(--transition-normal);
-    }
-    
-    .status-indicator.ready {
-      background-color: rgba(16, 185, 129, 0.08);
-      color: #065f46;
-    }
-    
-    .status-indicator.ready:before {
-      background-color: var(--success);
-      box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
-    }
-    
-    .status-indicator.not-ready {
-      background-color: rgba(245, 158, 11, 0.08);
-      color: #92400e;
-    }
-    
-    .status-indicator.not-ready:before {
-      background-color: var(--warn);
-      box-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
-    }
-    
-    .status-indicator.error {
-      background-color: rgba(239, 68, 68, 0.08);
-      color: #b91c1c;
-    }
-    
-    .status-indicator.error:before {
-      background-color: var(--error);
-      box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
-    }
-    
-    .message {
-      font-size: 0.925rem;
-      color: var(--text-light);
-      line-height: 1.6;
-      margin-bottom: var(--space-4);
-      animation: fadeIn 0.4s ease-out;
-    }
-    
-    .tip-box {
-      background-color: var(--primary-bg);
-      border-left: 3px solid var(--primary);
-      border-radius: var(--radius-sm);
-      padding: var(--space-3) var(--space-4);
-      font-size: 0.875rem;
-      margin-bottom: var(--space-4);
-      line-height: 1.6;
-      animation: fadeIn 0.5s ease-out;
-    }
-    
-    .tip-box strong {
-      color: var(--primary-dark);
-      font-weight: 600;
-    }
-    
-    .button-group {
-      display: flex;
-      gap: var(--space-3);
-      margin-top: var(--space-2);
-    }
-    
-    .button {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      padding: var(--space-2) var(--space-4);
-      border-radius: var(--radius);
-      font-size: 0.925rem;
-      font-weight: 500;
-      text-decoration: none;
-      cursor: pointer;
-      transition: all var(--transition-normal);
-      border: none;
-      outline: none;
-      min-height: 38px;
-    }
-    
-    .button:focus {
-      box-shadow: var(--shadow-focus);
-    }
-    
-    .button.primary {
-      background-color: var(--primary);
-      color: white;
-      box-shadow: 0 2px 4px rgba(59, 130, 246, 0.25);
-    }
-    
-    .button.primary:hover {
-      background-color: var(--primary-dark);
-      transform: translateY(-1px);
-      box-shadow: 0 4px 6px rgba(59, 130, 246, 0.3);
-    }
-    
-    .button.primary:active {
-      transform: translateY(0);
-      box-shadow: 0 1px 2px rgba(59, 130, 246, 0.3);
-    }
-    
-    .button.primary:disabled {
-      background-color: var(--primary-light);
-      opacity: 0.7;
-      cursor: not-allowed;
-      box-shadow: none;
-    }
-    
-    .button.secondary {
-      background-color: var(--bg-tertiary);
-      color: var(--text-light);
-    }
-    
-    .button.secondary:hover {
-      background-color: var(--border);
-      color: var(--text);
-    }
-    
-    .button-icon {
-      margin-right: var(--space-2);
-      width: 16px;
-      height: 16px;
-    }
-    
-    .loading-pulse {
-      animation: pulse 1.5s infinite;
-    }
-    
-    .footer {
-      margin-top: var(--space-6);
-      padding-top: var(--space-4);
-      border-top: 1px solid var(--border);
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    
-    .footer a {
-      color: var(--primary);
-      text-decoration: none;
-      transition: color var(--transition-fast);
-    }
-    
-    .footer a:hover {
-      color: var(--primary-dark);
-      text-decoration: underline;
-    }
-    
-    .footer-links {
-      display: flex;
-      gap: var(--space-3);
-    }
-    
-    /* Utility classes */
-    .flex {
-      display: flex;
-    }
-    
-    .flex-col {
-      flex-direction: column;
-    }
-    
-    .items-center {
-      align-items: center;
-    }
-    
-    .justify-between {
-      justify-content: space-between;
-    }
-    
-    .w-full {
-      width: 100%;
-    }
-    
-    .mt-1 {
-      margin-top: var(--space-1);
-    }
-    
-    .mt-2 {
-      margin-top: var(--space-2);
-    }
-    
-    .mt-4 {
-      margin-top: var(--space-4);
-    }
-    
-    .mb-2 {
-      margin-bottom: var(--space-2);
-    }
-    
-    .mb-4 {
-      margin-bottom: var(--space-4);
-    }
-  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="ui/tidal.css">
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <div class="logo-container">
-        <img src="icons/icon128.png" alt="SubtideX Logo" class="logo">
+  <div class="tidal-app">
+    <header class="tidal-header">
+      <div class="tidal-header__mesh" aria-hidden="true"></div>
+      <div class="tidal-header__content">
+        <div class="tidal-brand">
+          <img src="icons/icon48.png" alt="" class="tidal-brand__logo" width="40" height="40">
+          <div>
+            <div class="tidal-brand__title">SubtideX</div>
+            <div class="tidal-brand__tagline">Captions in one calm click</div>
+          </div>
+        </div>
+        <span class="tidal-version" id="app-version">v1.5.0</span>
       </div>
-      <div class="title-container">
-        <h1>SubtideX</h1>
-        <div class="subtitle">YouTube Subtitle Extractor</div>
+    </header>
+
+    <main class="tidal-body">
+      <div id="video-card" class="tidal-video-card">
+        <img id="video-thumb" class="tidal-video-card__thumb" alt="" width="88" height="50">
+        <div class="tidal-video-card__meta">
+          <div id="video-title" class="tidal-video-card__title">Video title</div>
+          <div id="video-url" class="tidal-video-card__url">youtube.com/watch</div>
+        </div>
       </div>
-    </div>
-    
-    <div class="status-section">
-      <div id="status-message" class="status-indicator not-ready">
-        Checking YouTube video status...
+
+      <div id="status-message" class="tidal-status tidal-status--waiting" role="status" aria-live="polite">
+        <span class="tidal-status__dot" aria-hidden="true"></span>
+        <span id="status-text">Checking page…</span>
       </div>
-      
-      <p id="message-text" class="message">
-        Please wait while we check if you're on a YouTube video page...
+
+      <p id="message-text" class="tidal-message">
+        Please wait while we check if you're on a YouTube video page.
       </p>
-    </div>
-    
-    <div id="main-content">
-      <div class="button-group">
-        <a id="youtube-button" href="https://www.youtube.com" target="_blank" class="button secondary">
-          <svg xmlns="http://www.w3.org/2000/svg" class="button-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22.54 6.42a2.78 2.78 0 0 0-1.94-2C18.88 4 12 4 12 4s-6.88 0-8.6.46a2.78 2.78 0 0 0-1.94 2A29 29 0 0 0 1 11.75a29 29 0 0 0 .46 5.33A2.78 2.78 0 0 0 3.4 19c1.72.46 8.6.46 8.6.46s6.88 0 8.6-.46a2.78 2.78 0 0 0 1.94-2 29 29 0 0 0 .46-5.25 29 29 0 0 0-.46-5.33z"></path>
-            <polygon points="9.75 15.02 15.5 11.75 9.75 8.48 9.75 15.02"></polygon>
+
+      <div id="steps-hint" class="tidal-steps-hint">
+        <div class="tidal-steps-hint__label">How it works</div>
+        <ul class="tidal-steps-hint__list">
+          <li>Opens the transcript panel on the right</li>
+          <li>Reads captions from the page</li>
+          <li>Saves a CSV to your Downloads folder</li>
+        </ul>
+      </div>
+
+      <div id="alert-box" class="tidal-alert is-hidden" hidden></div>
+
+      <div id="main-content" class="tidal-actions">
+        <button id="extract-button" class="tidal-btn tidal-btn--primary is-hidden" type="button">
+          <svg class="tidal-btn__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
           </svg>
-          Go to YouTube
-        </a>
-        
-        <button id="extract-button" class="button primary" style="display: none;">
-          <svg xmlns="http://www.w3.org/2000/svg" class="button-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-            <polyline points="7 10 12 15 17 10"></polyline>
-            <line x1="12" y1="15" x2="12" y2="3"></line>
-          </svg>
-          Extract Subtitles
+          <span id="extract-button-label">Download Captions</span>
         </button>
+
+        <a id="youtube-button" href="https://www.youtube.com" target="_blank" rel="noopener" class="tidal-btn tidal-btn--secondary">
+          <svg class="tidal-btn__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M22.54 6.42a2.78 2.78 0 0 0-1.94-2C18.88 4 12 4 12 4s-6.88 0-8.6.46a2.78 2.78 0 0 0-1.94 2A29 29 0 0 0 1 11.75a29 29 0 0 0 .46 5.33A2.78 2.78 0 0 0 3.4 19c1.72.46 8.6.46 8.6.46s6.88 0 8.6-.46a2.78 2.78 0 0 0 1.94-2 29 29 0 0 0 .46-5.25 29 29 0 0 0-.46-5.33z"/>
+            <polygon points="9.75 15.02 15.5 11.75 9.75 8.48 9.75 15.02"/>
+          </svg>
+          <span id="youtube-button-label">Go to YouTube</span>
+        </a>
       </div>
-    </div>
-    
-    <div class="footer">
-      <div class="creator">
-        Created by <a href="https://github.com/yniijia" target="_blank">Tony Fiston</a>
+    </main>
+
+    <footer class="tidal-footer">
+      <div>By <a href="https://github.com/yniijia" target="_blank" rel="noopener">Tony Fiston</a></div>
+      <div class="tidal-footer__links">
+        <a href="https://github.com/yniijia/SubtideX/issues" target="_blank" rel="noopener">Report issue</a>
       </div>
-      <div class="footer-links">
-        <a href="https://github.com/yniijia/subtidex/issues" target="_blank">Report Issue</a>
-      </div>
-    </div>
+    </footer>
   </div>
-  
+
   <script src="popup.js"></script>
 </body>
-</html> 
+</html>
