@@ -597,12 +597,46 @@ async function getYouTubeSubtitles() {
     setLoadingTexts({ messageText: 'Opening YouTube transcript panel...', step: 1 });
     const panelSubs = await extractFromTranscriptPanel();
     if (panelSubs?.length) {
-      console.log(`SubtideX: Extracted ${panelSubs.length} entries from transcript panel`);
-      return panelSubs;
+      if (subtitlesHaveUsableCaptionText(panelSubs)) {
+        console.log(
+          `SubtideX: Extracted ${panelSubs.length} entries from transcript panel (${countValidCaptionRows(panelSubs)} with caption text)`
+        );
+        return panelSubs;
+      }
+      console.warn(
+        `SubtideX: Transcript panel returned ${panelSubs.length} rows but only ${countValidCaptionRows(panelSubs)} had caption text — trying API fallback`
+      );
+      lastError = new Error('Transcript panel scrape returned timestamps without caption text');
     }
   } catch (e) {
     lastError = e;
     console.warn("SubtideX: Transcript panel extraction failed:", e);
+  }
+
+  try {
+    setLoadingTexts({ messageText: 'Fetching captions via YouTube API...' });
+    const res = await withTimeout(
+      sendMessageAsync({ action: 'getTranscriptViaMainWorld' }),
+      30000,
+      'YouTube API caption fetch timed out'
+    );
+    if (res?.status === 'error') {
+      throw new Error(res.error || 'InnerTube extraction failed');
+    }
+    const apiSubs = res?.result?.subtitles;
+    if (Array.isArray(apiSubs) && apiSubs.length > 0 && subtitlesHaveUsableCaptionText(apiSubs)) {
+      console.log(
+        `SubtideX: Extracted ${apiSubs.length} entries via InnerTube (${res.result?.source || 'unknown'})`
+      );
+      return apiSubs;
+    }
+    if (apiSubs?.length) {
+      throw new Error('InnerTube extractor returned timestamps without caption text');
+    }
+    throw new Error('InnerTube extractor returned no subtitles');
+  } catch (e) {
+    lastError = e;
+    console.warn('SubtideX: InnerTube API strategy failed:', e);
   }
 
   // Fallback: player caption tracks (skip token-gated exp=xpe URLs)
@@ -1365,7 +1399,146 @@ function parseYouTubeTimestampToSeconds(ts) {
   return h * 3600 + m * 60 + s;
 }
 
+function parseHumanReadableTimestampToSeconds(text) {
+  const t = String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!t) return null;
+
+  let match = t.match(/^(\d+)\s+(?:second|seconds|sec|secs)$/);
+  if (match) return Number(match[1]);
+
+  match = t.match(/^(\d+)\s+(?:minute|minutes|min|mins)$/);
+  if (match) return Number(match[1]) * 60;
+
+  match = t.match(/^(\d+)\s+(?:minute|minutes|min|mins)[,\s]+(\d+)\s+(?:second|seconds|sec|secs)$/);
+  if (match) return Number(match[1]) * 60 + Number(match[2]);
+
+  match = t.match(/^(\d+)\s+(?:hour|hours|hr|hrs)[,\s]+(\d+)\s+(?:minute|minutes|min|mins)(?:[,\s]+(\d+)\s+(?:second|seconds|sec|secs))?$/);
+  if (match) {
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    const seconds = match[3] ? Number(match[3]) : 0;
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+
+  return null;
+}
+
+function parseTranscriptTimestampToSeconds(ts) {
+  const colonParsed = parseYouTubeTimestampToSeconds(ts);
+  if (colonParsed != null) return colonParsed;
+  return parseHumanReadableTimestampToSeconds(ts);
+}
+
 const TRANSCRIPT_TIMESTAMP_RE = /^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?$/;
+const INLINE_TRANSCRIPT_TIME = /^(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s+([\s\S]+)$/;
+
+function isHumanReadableTimestampString(text) {
+  return parseHumanReadableTimestampToSeconds(text) != null;
+}
+
+function isTranscriptTimestampString(text) {
+  return (
+    TRANSCRIPT_TIMESTAMP_RE.test(String(text || '').trim()) ||
+    isHumanReadableTimestampString(text)
+  );
+}
+
+function isValidCaptionText(text) {
+  const trimmed = String(text || '').trim();
+  return trimmed.length > 0 && !isTranscriptTimestampString(trimmed);
+}
+
+function stripKnownTimestampPrefix(text) {
+  let normalized = String(text || '').trim();
+  if (!normalized) return '';
+
+  const colonInline = normalized.match(INLINE_TRANSCRIPT_TIME);
+  if (colonInline) return colonInline[2].trim();
+
+  const hrMatch = normalized.match(
+    /^(?:(?:\d+\s+(?:hour|hours|hr|hrs)[,\s]+)?(?:\d+\s+(?:minute|minutes|min|mins)[,\s]+)?\d+\s+(?:second|seconds|sec|secs)|(?:\d+\s+(?:minute|minutes|min|mins)))\s*[,.]?\s*(.+)$/i
+  );
+  if (hrMatch?.[1]) return hrMatch[1].trim();
+
+  if (isHumanReadableTimestampString(normalized)) return '';
+
+  return normalized;
+}
+
+function normalizeCaptionText(text, timestamp) {
+  let normalized = String(text || '').trim();
+  if (!normalized) return '';
+
+  const ts = String(timestamp || '').trim();
+  if (ts && normalized.startsWith(ts)) {
+    normalized = normalized.slice(ts.length).trim();
+  }
+
+  normalized = stripKnownTimestampPrefix(normalized);
+
+  return isValidCaptionText(normalized) ? normalized : '';
+}
+
+function extractCaptionFromAriaLabel(ariaLabel) {
+  const label = String(ariaLabel || '').trim();
+  if (!label) return '';
+
+  const withoutPrefix = stripKnownTimestampPrefix(label);
+  return isValidCaptionText(withoutPrefix) ? withoutPrefix : '';
+}
+
+function extractCaptionTextFromSegmentRow(row, timestamp) {
+  if (!row) return '';
+
+  const ariaCaption = extractCaptionFromAriaLabel(row.getAttribute?.('aria-label'));
+  if (ariaCaption) return ariaCaption;
+
+  const textSelectors = [
+    '.segment-text',
+    'yt-formatted-string.segment-text',
+    '[class*="segment-text"]',
+  ];
+
+  for (const selector of textSelectors) {
+    const el = row.querySelector?.(selector);
+    if (!el) continue;
+    const className = String(el.className || '');
+    if (className.includes('timestamp')) continue;
+
+    const ariaText = extractCaptionFromAriaLabel(el.getAttribute?.('aria-label'));
+    if (ariaText) return ariaText;
+
+    const text = normalizeCaptionText(el.textContent, timestamp);
+    if (text) return text;
+  }
+
+  const children = row.children ? Array.from(row.children) : [];
+  for (const child of children) {
+    const cls = String(child.className || '');
+    const tag = (child.tagName || '').toUpperCase();
+    if (cls.includes('timestamp') || tag === 'BUTTON') continue;
+
+    const ariaText = extractCaptionFromAriaLabel(child.getAttribute?.('aria-label'));
+    if (ariaText) return ariaText;
+
+    const text = normalizeCaptionText(child.textContent, timestamp);
+    if (text) return text;
+  }
+
+  const ts = String(timestamp || '').trim();
+  return normalizeCaptionText(row.textContent || '', ts);
+}
+
+function countValidCaptionRows(subtitles) {
+  return (subtitles || []).filter((row) => isValidCaptionText(row?.text)).length;
+}
+
+function subtitlesHaveUsableCaptionText(subtitles) {
+  if (!subtitles?.length) return false;
+  const validCount = countValidCaptionRows(subtitles);
+  if (validCount === 0) return false;
+  return validCount >= Math.max(1, Math.ceil(subtitles.length * 0.25));
+}
 
 function extractTimestampFromSegmentRow(row) {
   if (!row) return null;
@@ -1377,13 +1550,41 @@ function extractTimestampFromSegmentRow(row) {
   ].filter(Boolean);
 
   for (const el of tsCandidates) {
-    const text = (el.textContent || '').trim();
-    if (TRANSCRIPT_TIMESTAMP_RE.test(text)) return text;
+    const candidates = [
+      (el.textContent || '').trim(),
+      (el.getAttribute?.('aria-label') || '').trim(),
+    ].filter(Boolean);
+
+    for (const text of candidates) {
+      if (TRANSCRIPT_TIMESTAMP_RE.test(text) || isHumanReadableTimestampString(text)) {
+        return text;
+      }
+    }
   }
 
   const full = (row.textContent || '').trim();
   const inline = full.match(/^(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s+/);
-  return inline?.[1] || null;
+  if (inline?.[1]) return inline[1];
+
+  const hrPrefix = full.match(
+    /^((?:(?:\d+\s+(?:hour|hours|hr|hrs)[,\s]+)?(?:\d+\s+(?:minute|minutes|min|mins)[,\s]+)?\d+\s+(?:second|seconds|sec|secs)|(?:\d+\s+(?:minute|minutes|min|mins))))\b/i
+  );
+  return hrPrefix?.[1] || null;
+}
+
+function parseSegmentRow(row) {
+  let ts = extractTimestampFromSegmentRow(row);
+  let text = extractCaptionTextFromSegmentRow(row, ts);
+
+  if (!ts && isHumanReadableTimestampString(text)) {
+    ts = text;
+    text = extractCaptionTextFromSegmentRow(row, ts);
+  }
+
+  const start = parseTranscriptTimestampToSeconds(ts);
+  if (start == null || !isValidCaptionText(text)) return null;
+
+  return { start, text };
 }
 
 function isTranscriptSegmentsContainer(container) {
@@ -1406,18 +1607,6 @@ function countTranscriptSegmentNodes() {
   ).length;
 }
 
-function fillMissingSegmentStarts(segments) {
-  if (!segments.length) return segments;
-  let lastStart = 0;
-  for (const seg of segments) {
-    if (seg.start == null || seg.start < 0) {
-      seg.start = lastStart + 1;
-    }
-    lastStart = seg.start;
-  }
-  return segments;
-}
-
 function scrapeTranscriptFromSegmentsContainer() {
   const containers = deepQueryAll(document, (el) => isTranscriptSegmentsContainer(el));
   let bestSegments = [];
@@ -1429,24 +1618,10 @@ function scrapeTranscriptFromSegmentsContainer() {
       const tag = (child.tagName || '').toUpperCase();
       if (tag.includes('TRANSCRIPT-SECTION-HEADER')) continue;
 
-      const textEl =
-        child.querySelector?.('.segment-text') ||
-        child.querySelector?.('.yt-core-attributed-string') ||
-        child.querySelector?.('yt-formatted-string');
-
-      let text = (textEl?.textContent || '').trim();
-      if (!text) {
-        const raw = (child.textContent || '').trim();
-        text = raw.replace(/^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\s*/, '').trim();
-      }
-      if (!text) continue;
-
-      const ts = extractTimestampFromSegmentRow(child);
-      const start = parseYouTubeTimestampToSeconds(ts);
-      segments.push({ start: start ?? -1, text });
+      const parsed = parseSegmentRow(child);
+      if (parsed) segments.push(parsed);
     }
 
-    fillMissingSegmentStarts(segments);
     if (segments.length > bestSegments.length) bestSegments = segments;
   }
 
@@ -1464,18 +1639,9 @@ function scrapeTranscriptViewModels() {
 
   const segments = [];
   for (const vm of viewModels) {
-    const text = (
-      vm.querySelector?.('.yt-core-attributed-string') ||
-      vm.querySelector?.('.segment-text')
-    )?.textContent?.trim();
-    if (!text) continue;
-
-    const ts = extractTimestampFromSegmentRow(vm);
-    const start = parseYouTubeTimestampToSeconds(ts);
-    segments.push({ start: start ?? -1, text });
+    const parsed = parseSegmentRow(vm);
+    if (parsed) segments.push(parsed);
   }
-
-  fillMissingSegmentStarts(segments);
 
   if (segments.length) {
     console.log(`SubtideX: transcript-segment-view-model scrape found ${segments.length} segments`);
@@ -1682,17 +1848,25 @@ function parseTranscriptPlainText(text) {
 
     const inline = line.match(INLINE);
     if (inline) {
-      const start = parseYouTubeTimestampToSeconds(inline[1]);
-      if (start != null && inline[2].trim()) {
-        segments.push({ start, text: inline[2].trim() });
+      const start = parseTranscriptTimestampToSeconds(inline[1]);
+      const caption = normalizeCaptionText(inline[2], inline[1]);
+      if (start != null && caption) {
+        segments.push({ start, text: caption });
       }
       continue;
     }
 
-    if (TIME_ONLY.test(line) && lines[i + 1] && !TIME_ONLY.test(lines[i + 1])) {
-      const start = parseYouTubeTimestampToSeconds(line);
-      const caption = lines[i + 1];
-      if (start != null && caption) segments.push({ start, text: caption });
+    const lineIsTimestamp = TIME_ONLY.test(line) || isHumanReadableTimestampString(line);
+    const nextLine = lines[i + 1];
+    const nextIsTimestamp =
+      nextLine && (TIME_ONLY.test(nextLine) || isHumanReadableTimestampString(nextLine));
+
+    if (lineIsTimestamp && nextLine && !nextIsTimestamp) {
+      const start = parseTranscriptTimestampToSeconds(line);
+      const caption = normalizeCaptionText(nextLine, line);
+      if (start != null && caption) {
+        segments.push({ start, text: caption });
+      }
       i++;
     }
   }
@@ -1763,6 +1937,7 @@ function segmentsToSubtitleRows(segments) {
   const deduped = [];
   const seen = new Set();
   for (const s of segments) {
+    if (!isValidCaptionText(s.text)) continue;
     const key = `${s.start}|${s.text}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1790,111 +1965,37 @@ async function extractTranscriptSegmentsFromDom() {
   subs = scrapeTranscriptViewModels();
   if (subs?.length) return subs;
 
-  const TIME_ONLY = /^\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?$/;
-  const INLINE_TIME = /^(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s+([\s\S]+)$/;
-
   const root = findTranscriptPanelRoot() || document;
   const segments = [];
 
-  // 2026 UI: .segment-text / .segment-timestamp inside transcript panel
-  const segmentTextEls = deepQueryAll(
-    root,
-    (el) =>
-      el.classList?.contains('segment-text') ||
-      (typeof el.className === 'string' && el.className.includes('segment-text'))
-  );
-
-  for (const textEl of segmentTextEls) {
-    const row =
-      textEl.closest('ytd-transcript-segment-renderer') ||
-      textEl.closest('[role="listitem"]') ||
-      textEl.parentElement?.closest?.('ytd-transcript-segment-renderer') ||
-      textEl.parentElement;
-
-    let text = (textEl.textContent || '').trim();
-    let ts = null;
-
-    const tsEl =
-      row?.querySelector?.('.segment-timestamp, [class*="segment-timestamp"], [class*="timestamp"]') ||
-      deepQueryAll(row || textEl.parentElement || document, (el) =>
-        TIME_ONLY.test((el.textContent || '').trim())
-      )[0];
-
-    if (tsEl) ts = (tsEl.textContent || '').trim();
-
-    if (!ts) {
-      const inline = text.match(INLINE_TIME);
-      if (inline) {
-        ts = inline[1];
-        text = inline[2].trim();
-      }
-    }
-
-    const start = parseYouTubeTimestampToSeconds(ts);
-    if (start != null && text) segments.push({ start, text });
-  }
-
-  // Classic: ytd-transcript-segment-renderer rows
-  if (segments.length === 0) {
-    const renderers = deepQueryAll(
-      root,
-      (el) => (el.tagName || '').toLowerCase() === 'ytd-transcript-segment-renderer'
+  const segmentRows = deepQueryAll(root, (el) => {
+    const tag = (el.tagName || '').toLowerCase();
+    return (
+      tag === 'transcript-segment-view-model' ||
+      tag === 'ytd-transcript-segment-renderer' ||
+      el.getAttribute?.('role') === 'listitem'
     );
+  });
 
-    for (const renderer of renderers) {
-      const tsEl =
-        renderer.querySelector('.segment-timestamp, [class*="timestamp"]') ||
-        deepQueryAll(renderer, (el) => TIME_ONLY.test((el.textContent || '').trim()))[0];
-      const textEl =
-        renderer.querySelector('.segment-text, [class*="segment-text"], yt-formatted-string');
-
-      let ts = (tsEl?.textContent || '').trim();
-      let text = (textEl?.textContent || '').trim();
-
-      if (!text) {
-        const full = (renderer.textContent || '').trim();
-        text = ts ? full.replace(ts, '').trim() : full;
-      }
-
-      const inline = !ts ? text.match(INLINE_TIME) : null;
-      if (inline) {
-        ts = inline[1];
-        text = inline[2].trim();
-      }
-
-      const start = parseYouTubeTimestampToSeconds(ts);
-      if (start != null && text) segments.push({ start, text });
-    }
+  for (const row of segmentRows) {
+    const parsed = parseSegmentRow(row);
+    if (parsed) segments.push(parsed);
   }
 
-  // Fallback: #segments-container yt-formatted-string pairs
-  if (segments.length === 0) {
-    const container =
-      root.querySelector('#segments-container') ||
-      deepQueryAll(root, (el) => el.id === 'segments-container')[0];
+  if (segments.length) {
+    return segmentsToSubtitleRows(segments);
+  }
 
-    if (container) {
-      const lines = deepQueryAll(container, (el) => {
-        const tag = (el.tagName || '').toLowerCase();
-        return tag === 'yt-formatted-string' || tag === 'div' || tag === 'span';
-      })
-        .map((el) => (el.textContent || '').trim())
-        .filter(Boolean);
+  const container =
+    root.querySelector('#segments-container') ||
+    deepQueryAll(root, (el) => el.id === 'segments-container')[0];
 
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const inline = line.match(INLINE_TIME);
-        if (inline) {
-          const start = parseYouTubeTimestampToSeconds(inline[1]);
-          if (start != null) segments.push({ start, text: inline[2].trim() });
-          continue;
-        }
-        if (TIME_ONLY.test(line) && lines[i + 1] && !TIME_ONLY.test(lines[i + 1])) {
-          const start = parseYouTubeTimestampToSeconds(line);
-          if (start != null) segments.push({ start, text: lines[i + 1] });
-          i++;
-        }
-      }
+  if (container) {
+    for (const child of container.children) {
+      const tag = (child.tagName || '').toUpperCase();
+      if (tag.includes('TRANSCRIPT-SECTION-HEADER')) continue;
+      const parsed = parseSegmentRow(child);
+      if (parsed) segments.push(parsed);
     }
   }
 
