@@ -1,7 +1,7 @@
 {
   "name": "subtidex",
   "version": "1.5.1",
-  "description": "Download YouTube captions as CSV — transcript panel extraction, Tidal UI",
+  "description": "Download YouTube captions as CSV — transcript panel extraction",
   "author": "Tony Fiston <https://github.com/yniijia>",
   "license": "MIT",
   "scripts": {
