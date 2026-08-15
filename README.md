@@ -1,15 +1,17 @@
+
+
 # SubtideX
 
 <div align="center">
   <img src="icons/icon128.png" alt="SubtideX" width="96" height="96">
   <p><strong>Download YouTube captions in one calm click.</strong></p>
   <p>
-    <a href="https://github.com/yniijia/subtidex/releases/tag/v1.5.0"><img src="https://img.shields.io/badge/version-1.5.0-teal?style=flat-square" alt="v1.5.0"></a>
+    <a href="https://github.com/yniijia/subtidex/releases/tag/v1.5.1"><img src="https://img.shields.io/badge/version-1.5.1-teal?style=flat-square" alt="v1.5.1"></a>
     <a href="https://github.com/yniijia/subtidex/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
   </p>
   <p>
     <a href="https://github.com/yniijia/subtidex">GitHub</a> ·
-    <a href="https://github.com/yniijia/subtidex/releases/latest">Download v1.5.0</a> ·
+    <a href="https://github.com/yniijia/subtidex/releases/latest">Download v1.5.1</a> ·
     <a href="https://github.com/yniijia/subtidex/issues">Report an issue</a>
   </p>
 </div>
